@@ -3,7 +3,6 @@
 `agent_core/` -- the agent logic
 `services/` -- services needed
 `app.py` -- run the app
-`Deployed_Code/` -- the same code but for deployment (DON'T change code here)
 
 # Setup
 
