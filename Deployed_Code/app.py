@@ -80,7 +80,7 @@ async def daily_research_task():
         logger.error(f"Daily research task failed: {e}", exc_info=True)
 
 
-def main():
+async def main():
     """Main entry point - sets up scheduler and runs forever."""
     # Get schedule config from env
     schedule_hour = int(os.getenv("SCHEDULE_HOUR", "6"))
@@ -95,31 +95,18 @@ def main():
         name="Daily AI News Research",
     )
 
-    # Handle graceful shutdown
-    loop = asyncio.new_event_loop()
-    asyncio.set_event_loop(loop)
-
-    def shutdown(signum, frame):
-        logger.info("Shutting down...")
-        scheduler.shutdown(wait=False)
-        loop.stop()
-        sys.exit(0)
-
-    signal.signal(signal.SIGINT, shutdown)
-    signal.signal(signal.SIGTERM, shutdown)
-
     scheduler.start()
     logger.info(f"Scheduler started. Daily task scheduled for {schedule_hour:02d}:{schedule_minute:02d} {timezone}")
     logger.info("Press Ctrl+C to exit")
 
     # Run forever
     try:
-        loop.run_forever()
+        while True:
+            await asyncio.sleep(3600)
     except (KeyboardInterrupt, SystemExit):
         pass
     finally:
         scheduler.shutdown()
-        loop.close()
 
 
 if __name__ == "__main__":
@@ -128,4 +115,4 @@ if __name__ == "__main__":
         logger.info("Running research task immediately (--now flag)")
         asyncio.run(daily_research_task())
     else:
-        main()
+        asyncio.run(main())
