@@ -1,7 +1,9 @@
 # AI News Agent
 
 `agent_core/` -- the agent logic
+
 `services/` -- services needed
+
 `app.py` -- run the app
 
 # Setup
@@ -15,4 +17,5 @@
 # Run Agent
 
 `python3 app.py --now` run the agent right away only once
+
 `python3 app.py` start the scheduler and run agent on schedule (running forever)
