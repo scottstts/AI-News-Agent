@@ -5,3 +5,4 @@ __pycache__/
 research_history/
 test_results/
 .crawl4ai_cache/
+credentials/
