@@ -1,11 +1,12 @@
 from pathlib import Path
 
 from google.adk.agents import Agent
+from google.adk.models.lite_llm import LiteLlm
 from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
-from .tools import fetch_page_content, get_date, get_previous_research_result, youtube_search_tool
+from .tools import fetch_page_content, get_date, get_previous_research_result, get_token_budget_info, youtube_search_tool, MAX_INPUT_TOKENS
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -45,7 +46,11 @@ youtube_viewer_agent = Agent(
 
 research_agent = Agent(
     name="research_agent",
-    model="gemini-3-pro-preview",
+    model=LiteLlm(
+        model="openai/gpt-5.2",
+        reasoning_effort="high",
+        max_input_tokens=MAX_INPUT_TOKENS,
+    ),
     description="The main research agent that researches the specified content by organizing subagents and using various tools.",
     tools=[
         AgentTool(agent=google_search_only_agent),
@@ -53,6 +58,7 @@ research_agent = Agent(
         fetch_page_content,
         get_date,
         get_previous_research_result,
+        get_token_budget_info,
         youtube_search_tool,
     ],
     instruction=_load_prompt("research_agent_prompt.md").replace("<Sub_Topic_List>", _load_prompt("sub_topic_list.md")),

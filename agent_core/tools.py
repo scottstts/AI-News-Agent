@@ -5,10 +5,21 @@ import os
 import asyncio
 from typing import List, Dict, Any
 
+MAX_INPUT_TOKENS = 272000
 
 def get_date() -> str:
     """Returns the current date in YYYY-MM-DD format."""
     return datetime.now().strftime("%Y-%m-%d")
+
+
+def get_token_budget_info() -> dict:
+    """
+    Returns max token budget to avoid hitting the limit.
+
+    Returns:
+        dict: max_input_tokens.
+    """
+    return {"max_input_tokens": MAX_INPUT_TOKENS}
 
 def get_previous_research_result() -> str:
     """
