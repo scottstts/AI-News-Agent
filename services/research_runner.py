@@ -2,15 +2,39 @@
 
 import json
 import re
+import uuid
 from datetime import datetime
 from pathlib import Path
 
-from google.adk.runners import InMemoryRunner
+from google.adk.runners import Runner
+from google.adk.sessions import InMemorySessionService
+from google.genai import types
 
 from agent_core.agents import research_agent
 
+APP_NAME = "ai_news_research"
+
 RESEARCH_HISTORY_DIR = Path(__file__).resolve().parent.parent / "research_history"
 RESEARCH_HISTORY_DIR.mkdir(exist_ok=True)
+
+# File for real-time token usage tracking (read by get_token_budget_info tool)
+TOKEN_USAGE_FILE = RESEARCH_HISTORY_DIR / "current_token_usage.json"
+
+
+def update_token_usage(prompt_tokens: int, total_tokens: int) -> None:
+    """Write current token usage to file for the agent tool to read."""
+    data = {
+        "prompt_token_count": prompt_tokens,
+        "total_token_count": total_tokens,
+        "updated_at": datetime.now().isoformat(),
+    }
+    TOKEN_USAGE_FILE.write_text(json.dumps(data), encoding="utf-8")
+
+
+def clear_token_usage() -> None:
+    """Clear token usage file at start of new run."""
+    if TOKEN_USAGE_FILE.exists():
+        TOKEN_USAGE_FILE.unlink()
 
 
 def event_to_dict(event):
@@ -141,9 +165,48 @@ async def run_research_agent() -> tuple[Path, Path]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     timestamp_readable = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    runner = InMemoryRunner(agent=research_agent)
-    user_message = "Research the latest AI development news from the past 24 hours as instructed."
-    trace = await runner.run_debug(user_message)
+    # Clear any stale token usage from previous run
+    clear_token_usage()
+
+    # Create session service and runner
+    session_service = InMemorySessionService()
+    runner = Runner(
+        agent=research_agent,
+        app_name=APP_NAME,
+        session_service=session_service,
+    )
+
+    user_id = "research_system"
+    session_id = f"research_{timestamp}_{uuid.uuid4().hex[:8]}"
+
+    # Create session before running (required for run_async)
+    await session_service.create_session(
+        app_name=APP_NAME,
+        user_id=user_id,
+        session_id=session_id,
+    )
+
+    user_message = types.Content(
+        role="user",
+        parts=[types.Part(text="Research the latest AI development news from the past 24 hours as instructed.")],
+    )
+
+    # Collect events while streaming and updating token usage
+    trace = []
+    async for event in runner.run_async(
+        user_id=user_id,
+        session_id=session_id,
+        new_message=user_message,
+    ):
+        trace.append(event)
+
+        # Update token usage file after each event with usage_metadata
+        if hasattr(event, "usage_metadata") and event.usage_metadata:
+            usage = event.usage_metadata
+            prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
+            total_tokens = getattr(usage, "total_token_count", 0) or 0
+            if prompt_tokens > 0:
+                update_token_usage(prompt_tokens, total_tokens)
 
     # Save trace
     trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
@@ -155,6 +218,9 @@ async def run_research_agent() -> tuple[Path, Path]:
     final_text = extract_final_text(trace)
     md_file = RESEARCH_HISTORY_DIR / f"research_{timestamp}.md"
     write_results_to_md(final_text, md_file, timestamp_readable)
+
+    # Clean up token usage file after run completes
+    clear_token_usage()
 
     return md_file, trace_file
 

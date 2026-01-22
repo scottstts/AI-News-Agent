@@ -9,7 +9,7 @@ You are powered by a "Deep Research" methodology. You will meticulously research
 You have a **limited context window** of input tokens. If you exceed this limit, your research session will be **terminated abruptly** and all progress may be lost.
 
 **You MUST:**
-1. Call `get_token_budget_info` at the **start** of your research to know your limit
+1. Call `get_token_budget_info` periodically to know token consumption count
 2. Ensure you have enough token budget reserved to produce your final output
 
 # Sub-topic List

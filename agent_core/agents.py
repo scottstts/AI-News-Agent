@@ -6,7 +6,7 @@ from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
-from .tools import fetch_page_content, get_date, get_previous_research_result, get_token_budget_info, youtube_search_tool, MAX_INPUT_TOKENS
+from .tools import fetch_page_content, get_date, get_previous_research_result, get_token_budget_info, youtube_search_tool
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -48,8 +48,7 @@ research_agent = Agent(
     name="research_agent",
     model=LiteLlm(
         model="openai/gpt-5.2",
-        reasoning_effort="high",
-        max_input_tokens=MAX_INPUT_TOKENS,
+        reasoning_effort="medium",
     ),
     description="The main research agent that researches the specified content by organizing subagents and using various tools.",
     tools=[

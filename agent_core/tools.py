@@ -5,7 +5,8 @@ import os
 import asyncio
 from typing import List, Dict, Any
 
-MAX_INPUT_TOKENS = 272000
+# GPT 5.2 has hard 272000 max input token limit
+MAX_INPUT_TOKENS = 200000
 
 def get_date() -> str:
     """Returns the current date in YYYY-MM-DD format."""
@@ -14,12 +15,35 @@ def get_date() -> str:
 
 def get_token_budget_info() -> dict:
     """
-    Returns max token budget to avoid hitting the limit.
+    Returns token budget information including max limit and current consumption.
+    Call this periodically to monitor your token usage and avoid exceeding the limit.
 
     Returns:
-        dict: max_input_tokens.
+        dict: Contains max_input_tokens, current_prompt_tokens, tokens_remaining, and usage_percent.
     """
-    return {"max_input_tokens": MAX_INPUT_TOKENS}
+    import json
+    from pathlib import Path
+
+    # Token usage file written by research_runner during execution
+    token_usage_file = Path(__file__).resolve().parent.parent / "research_history" / "current_token_usage.json"
+
+    current_prompt_tokens = 0
+    if token_usage_file.exists():
+        try:
+            data = json.loads(token_usage_file.read_text(encoding="utf-8"))
+            current_prompt_tokens = data.get("prompt_token_count", 0)
+        except (json.JSONDecodeError, IOError):
+            pass
+
+    tokens_remaining = MAX_INPUT_TOKENS - current_prompt_tokens
+    usage_percent = round((current_prompt_tokens / MAX_INPUT_TOKENS) * 100, 1) if MAX_INPUT_TOKENS > 0 else 0
+
+    return {
+        "max_input_tokens": MAX_INPUT_TOKENS,
+        "current_prompt_tokens": current_prompt_tokens,
+        "tokens_remaining": tokens_remaining,
+        "usage_percent": usage_percent,
+    }
 
 def get_previous_research_result() -> str:
     """
