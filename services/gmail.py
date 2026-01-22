@@ -107,6 +107,23 @@ def markdown_to_html(md_content: str) -> str:
                 padding-left: 20px;
                 color: #666;
             }}
+            table {{
+                border-collapse: collapse;
+                margin: 15px 0;
+                font-size: 14px;
+            }}
+            th, td {{
+                border: 1px solid #e0e0e0;
+                padding: 8px 12px;
+                text-align: left;
+            }}
+            th {{
+                background-color: #f5f5f5;
+                font-weight: 600;
+            }}
+            tr:nth-child(even) {{
+                background-color: #fafafa;
+            }}
         </style>
     </head>
     <body>

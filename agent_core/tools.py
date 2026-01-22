@@ -233,6 +233,54 @@ def fetch_page_content(urls: list[str]) -> dict:
 
     return crawl_results
 
+def verify_urls(urls: list[str]) -> list[dict]:
+    """
+    Verify that URLs are alive and accessible by performing HEAD requests.
+    Use this to validate source URLs before including them in your final output.
+
+    Args:
+        urls (list[str]): A list of URLs to verify.
+
+    Returns:
+        A list of dicts, each with 'url', 'valid' (bool), and 'status_code' or 'error'.
+    """
+    import requests
+
+    results = []
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    }
+
+    for url in urls:
+        try:
+            # Use HEAD request for lightweight check; fall back to GET if HEAD fails
+            resp = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
+            if resp.status_code == 405:  # Method not allowed, try GET
+                resp = requests.get(url, headers=headers, timeout=10, allow_redirects=True, stream=True)
+                resp.close()
+
+            valid = resp.status_code < 400
+            results.append({
+                "url": url,
+                "valid": valid,
+                "status_code": resp.status_code,
+            })
+        except requests.exceptions.Timeout:
+            results.append({
+                "url": url,
+                "valid": False,
+                "error": "timeout",
+            })
+        except requests.exceptions.RequestException as e:
+            results.append({
+                "url": url,
+                "valid": False,
+                "error": str(e),
+            })
+
+    return results
+
+
 def youtube_search_tool(
         query: str,
         max_results: int = 10,

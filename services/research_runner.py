@@ -70,6 +70,81 @@ def extract_final_text(trace: list) -> str:
     return "No final text found in trace."
 
 
+def extract_run_stats(trace_data: list) -> dict:
+    """
+    Extract run statistics from trace data.
+
+    Returns:
+        dict with keys: total_tool_calls, search_agent_calls, fetch_calls,
+        youtube_search_calls, youtube_viewer_calls, verify_urls_calls,
+        final_prompt_tokens, final_total_tokens
+    """
+    stats = {
+        "total_tool_calls": 0,
+        "search_agent_calls": 0,
+        "fetch_calls": 0,
+        "youtube_search_calls": 0,
+        "youtube_viewer_calls": 0,
+        "verify_urls_calls": 0,
+        "final_prompt_tokens": 0,
+        "final_total_tokens": 0,
+    }
+
+    for event in trace_data:
+        # Count tool calls from function_call parts
+        content = event.get("content", {})
+        parts = content.get("parts", []) if content else []
+
+        for part in parts:
+            if part and part.get("function_call"):
+                func_name = part["function_call"].get("name", "")
+                stats["total_tool_calls"] += 1
+
+                if func_name == "google_search_agent":
+                    stats["search_agent_calls"] += 1
+                elif func_name == "fetch_page_content":
+                    stats["fetch_calls"] += 1
+                elif func_name == "youtube_search_tool":
+                    stats["youtube_search_calls"] += 1
+                elif func_name == "youtube_viewer_agent":
+                    stats["youtube_viewer_calls"] += 1
+                elif func_name == "verify_urls":
+                    stats["verify_urls_calls"] += 1
+
+        # Track final token usage (last event with usage_metadata wins)
+        usage = event.get("usage_metadata")
+        if usage:
+            prompt_tokens = usage.get("prompt_token_count", 0)
+            total_tokens = usage.get("total_token_count", 0)
+            if prompt_tokens:
+                stats["final_prompt_tokens"] = prompt_tokens
+            if total_tokens:
+                stats["final_total_tokens"] = total_tokens
+
+    return stats
+
+
+def format_run_stats_md(stats: dict, run_duration_seconds: float) -> str:
+    """Format run stats into a markdown section."""
+    lines = [
+        "## Run Statistics",
+        "",
+        f"| Metric | Value |",
+        f"|--------|-------|",
+        f"| Run Duration | {run_duration_seconds:.1f}s |",
+        f"| Total Tool Calls | {stats['total_tool_calls']} |",
+        f"| Search Agent Calls | {stats['search_agent_calls']} |",
+        f"| Page Fetches | {stats['fetch_calls']} |",
+        f"| YouTube Searches | {stats['youtube_search_calls']} |",
+        f"| YouTube Viewer Calls | {stats['youtube_viewer_calls']} |",
+        f"| URL Verifications | {stats['verify_urls_calls']} |",
+        f"| Final Prompt Tokens | {stats['final_prompt_tokens']:,} |",
+        f"| Final Total Tokens | {stats['final_total_tokens']:,} |",
+        "",
+    ]
+    return "\n".join(lines)
+
+
 def extract_json_from_text(text: str) -> dict | None:
     """Extract JSON object from text that may contain markdown code blocks."""
     # Try to find JSON in code blocks first
@@ -93,7 +168,7 @@ def extract_json_from_text(text: str) -> dict | None:
     return None
 
 
-def format_research_to_md(data: dict, timestamp: str) -> str:
+def format_research_to_md(data: dict, timestamp: str, stats_md: str = "") -> str:
     """Format parsed research JSON into readable markdown."""
     lines = [
         "# AI News Research Results",
@@ -101,6 +176,10 @@ def format_research_to_md(data: dict, timestamp: str) -> str:
         f"**Generated:** {timestamp}",
         "",
     ]
+
+    # Insert run stats right after the header if provided
+    if stats_md:
+        lines.append(stats_md)
 
     if data.get("comments"):
         lines.extend([
@@ -143,15 +222,19 @@ def format_research_to_md(data: dict, timestamp: str) -> str:
     return "\n".join(lines)
 
 
-def write_results_to_md(text: str, output_path: Path, timestamp: str) -> None:
+def write_results_to_md(text: str, output_path: Path, timestamp: str, stats_md: str = "") -> None:
     """Write extracted text to markdown file, parsing JSON if possible."""
     parsed = extract_json_from_text(text)
 
     if parsed and "news" in parsed:
-        formatted = format_research_to_md(parsed, timestamp)
+        formatted = format_research_to_md(parsed, timestamp, stats_md)
         output_path.write_text(formatted, encoding="utf-8")
     else:
-        content = f"# Research Agent Run\n\n**Generated:** {timestamp}\n\n{text}"
+        # Fallback: include stats even if JSON parsing fails
+        header = f"# Research Agent Run\n\n**Generated:** {timestamp}\n\n"
+        if stats_md:
+            header += stats_md + "\n"
+        content = header + text
         output_path.write_text(content, encoding="utf-8")
 
 
@@ -162,6 +245,9 @@ async def run_research_agent() -> tuple[Path, Path]:
     Returns:
         Tuple of (md_file_path, trace_file_path)
     """
+    import time
+
+    start_time = time.time()
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     timestamp_readable = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
@@ -208,16 +294,23 @@ async def run_research_agent() -> tuple[Path, Path]:
             if prompt_tokens > 0:
                 update_token_usage(prompt_tokens, total_tokens)
 
+    # Calculate run duration
+    run_duration = time.time() - start_time
+
     # Save trace
     trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
     trace_data = [event_to_dict(e) for e in trace]
     with trace_file.open("w", encoding="utf-8") as f:
         json.dump(trace_data, f, indent=2, default=str)
 
-    # Save markdown results
+    # Extract run stats from trace
+    stats = extract_run_stats(trace_data)
+    stats_md = format_run_stats_md(stats, run_duration)
+
+    # Save markdown results with stats
     final_text = extract_final_text(trace)
     md_file = RESEARCH_HISTORY_DIR / f"research_{timestamp}.md"
-    write_results_to_md(final_text, md_file, timestamp_readable)
+    write_results_to_md(final_text, md_file, timestamp_readable, stats_md)
 
     # Clean up token usage file after run completes
     clear_token_usage()
