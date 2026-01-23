@@ -2,8 +2,8 @@
 
 from .google_drive import upload_to_drive, get_drive_service
 from .gmail import send_research_email, get_gmail_service, markdown_to_html
-from .research_runner import run_research_agent, RESEARCH_HISTORY_DIR
-from .cleanup import cleanup_old_files, get_file_counts
+from .research_runner import run_research_agent
+from .cleanup import cleanup_old_files, get_file_counts, RESEARCH_HISTORY_DIR
 
 __all__ = [
     "upload_to_drive",

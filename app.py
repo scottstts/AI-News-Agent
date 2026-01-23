@@ -22,7 +22,6 @@ from services import (
     run_research_agent,
     upload_to_drive,
     send_research_email,
-    cleanup_old_files,
 )
 
 # Configure logging
@@ -39,34 +38,31 @@ logger = logging.getLogger(__name__)
 async def daily_research_task():
     """
     The main daily research task:
-    1. Cleans up previous run files
-    2. Runs the research agent
-    3. Uploads results to Google Drive
-    4. Sends email with results
+    1. Runs the research agent (handles cleanup internally)
+    2. Uploads results to Google Drive
+    3. Sends email with results
     """
     logger.info("=" * 50)
     logger.info("Starting daily research task...")
     logger.info("=" * 50)
 
     try:
-        # Step 1: Cleanup previous run files first
-        deleted = cleanup_old_files(keep_latest=False)
-        if deleted:
-            logger.info(f"Cleaned up {len(deleted)} files from previous run")
-
-        # Step 2: Run the research agent
+        # Run the research agent (handles its own cleanup internally:
+        # - clears agent_notes and token_usage at start
+        # - on success: cleans up previous run's files
+        # - on failure: cleans up current run's partial files, preserves previous results)
         logger.info("Running research agent...")
         md_file, trace_file = await run_research_agent()
         logger.info(f"Research complete: {md_file.name}")
 
-        # Step 3: Upload to Google Drive
+        # Upload to Google Drive
         try:
             drive_file_id = upload_to_drive(md_file)
             logger.info(f"Uploaded to Google Drive: {drive_file_id}")
         except Exception as e:
             logger.error(f"Google Drive upload failed: {e}")
 
-        # Step 4: Send email
+        # Send email
         try:
             message_id = send_research_email(md_file)
             logger.info(f"Email sent successfully: {message_id}")
