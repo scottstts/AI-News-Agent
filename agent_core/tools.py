@@ -19,7 +19,7 @@ def get_token_budget_info() -> dict:
     Call this periodically to monitor your token usage and avoid exceeding the limit.
 
     Returns:
-        dict: Contains max_input_tokens, current_prompt_tokens, tokens_remaining, and usage_percent.
+        dict: Contains max_input_tokens, current_prompt_tokens, tokens_remaining, usage_percent, potential warning message.
     """
     import json
     from pathlib import Path
@@ -36,13 +36,16 @@ def get_token_budget_info() -> dict:
             pass
 
     tokens_remaining = MAX_INPUT_TOKENS - current_prompt_tokens
-    usage_percent = round((current_prompt_tokens / MAX_INPUT_TOKENS) * 100, 1) if MAX_INPUT_TOKENS > 0 else 0
+    usage_percent = round((current_prompt_tokens / MAX_INPUT_TOKENS) * 100, 2) if MAX_INPUT_TOKENS > 0 else 0
+
+    warning_msg = "SYSTEM WARNING: Token usage has exceeded 90% of max token usage limit, you MUST wrap up the research and start presenting the findings!!!" if usage_percent > 90 else "None"
 
     return {
         "max_input_tokens": MAX_INPUT_TOKENS,
         "current_prompt_tokens": current_prompt_tokens,
         "tokens_remaining": tokens_remaining,
-        "usage_percent": usage_percent,
+        "usage_percent": f"{usage_percent}%",
+        "usage_warning": warning_msg,
     }
 
 def get_previous_research_result() -> str:
@@ -231,7 +234,10 @@ def fetch_page_content(urls: list[str]) -> dict:
         except Exception as e:
             return [{"url": None, "status": "failure", "error": f"Error running crawler: {str(e)}"}]
 
-    return crawl_results
+    return {
+        "web_page_content": crawl_results,
+        "token_usage_info": get_token_budget_info()
+    }
 
 def verify_urls(urls: list[str]) -> list[dict]:
     """

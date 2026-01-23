@@ -11,7 +11,7 @@ You will receive a JSON input object with fields:
 
 1. Read the objectives carefully.
 2. For each URL, inspect the video and extract information relevant to the objectives.
-3. Produce reports that directly answers the objectives across all videos.
+3. Produce reports that directly answer the questions / verify the statements / fulfil research goals in the provided objectives for EACH video.
 
 # Output Format
 

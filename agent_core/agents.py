@@ -27,6 +27,16 @@ class YoutubeViewInput(BaseModel):
         description="A destailed instruction on what to look for in the videos; This objective will need to be targeted and detailed enough so that the subagent can follow it and provide the findings exactly as what the main agent would need. The objectives string is provided by the main agent."
     )
 
+# Use this instead of AgentTool to append token usage info at the end of every tool call
+class AgentToolWithTokenMessage(AgentTool):
+    async def run_async(self, *, args, tool_context):
+        agent_output = await super().run_async(args=args, tool_context=tool_context)
+
+        return {
+            "subagent_result": agent_output,
+            "token_usage_info": get_token_budget_info(),
+        }
+
 google_search_only_agent = Agent(
     name="google_search_agent",
     model="gemini-3-flash-preview",
@@ -52,8 +62,8 @@ research_agent = Agent(
     ),
     description="The main research agent that researches the specified content by organizing subagents and using various tools.",
     tools=[
-        AgentTool(agent=google_search_only_agent),
-        AgentTool(agent=youtube_viewer_agent),
+        AgentToolWithTokenMessage(agent=google_search_only_agent),
+        AgentToolWithTokenMessage(agent=youtube_viewer_agent),
         fetch_page_content,
         get_date,
         get_previous_research_result,
