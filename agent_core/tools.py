@@ -227,7 +227,7 @@ def fetch_page_content(urls: list[str]) -> dict:
                     # Apply content size limit
                     content_text = _truncate_content(content_text.strip()) if content_text else ""
 
-                    return {
+                    result = {
                         "url": url,
                         "redirected_url": getattr(crawl_result, "redirected_url", None) or url,
                         "title": (crawl_result.metadata or {}).get("title") if crawl_result.metadata else None,
@@ -237,11 +237,14 @@ def fetch_page_content(urls: list[str]) -> dict:
                     }
                 else:
                     error_message = getattr(crawl_result, "error_message", "Unknown error") if crawl_result else "Empty crawl result"
-                    return {
+                    result = {
                         "url": url,
                         "status": "failure",
                         "error": error_message,
                     }
+
+            return result
+
         except Exception as e:
             return {
                 "url": url,
@@ -249,16 +252,86 @@ def fetch_page_content(urls: list[str]) -> dict:
                 "error": str(e),
             }
 
+    async def _wait_for_tasks_to_clear(loop: asyncio.AbstractEventLoop, timeout: float = 30.0) -> None:
+        """Wait for all pending tasks (except current) to complete, with timeout."""
+        import time
+        current_task = asyncio.current_task(loop)
+        start = time.monotonic()
+        while True:
+            pending = [t for t in asyncio.all_tasks(loop) if t is not current_task and not t.done()]
+            if not pending:
+                break
+            if time.monotonic() - start > timeout:
+                # Timeout reached, cancel remaining tasks
+                for task in pending:
+                    task.cancel()
+                await asyncio.gather(*pending, return_exceptions=True)
+                break
+            # Brief yield to let tasks complete
+            await asyncio.sleep(0.05)
+
     async def _crawl_all(target_urls: List[str]) -> List[Dict[str, Any]]:
         """Process URLs one at a time to minimize peak memory usage."""
+        import gc
         results: List[Dict[str, Any]] = []
         for url in target_urls:
             result = await _crawl_single_url(url)
             results.append(result)
             # Force garbage collection between URLs to free browser memory
-            import gc
             gc.collect()
         return results
+
+    def _cleanup_loop(loop: asyncio.AbstractEventLoop) -> None:
+        """
+        Comprehensive event loop cleanup that handles subprocess transports.
+        This prevents 'Event loop is closed' errors from Playwright on Linux.
+        """
+        import gc
+
+        # Step 1: Cancel all pending tasks
+        try:
+            pending = asyncio.all_tasks(loop)
+            for task in pending:
+                task.cancel()
+            if pending:
+                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
+        except Exception:
+            pass
+
+        # Step 2: Shutdown async generators
+        try:
+            loop.run_until_complete(loop.shutdown_asyncgens())
+        except Exception:
+            pass
+
+        # Step 3: Shutdown default executor
+        try:
+            loop.run_until_complete(loop.shutdown_default_executor())
+        except Exception:
+            pass
+
+        # Step 4: Run GC to trigger __del__ methods while loop is still open
+        # This allows subprocess transports to close properly
+        gc.collect()
+
+        # Step 5: Process any callbacks that GC might have scheduled
+        # Run the loop briefly to handle pending callbacks from transport cleanup
+        try:
+            loop.run_until_complete(asyncio.sleep(0))
+        except Exception:
+            pass
+
+        # Step 6: Final GC pass
+        gc.collect()
+
+        # Step 7: Close the loop
+        loop.close()
+
+        # Step 8: Unset the event loop for this thread to avoid any lingering references
+        try:
+            asyncio.set_event_loop(None)
+        except Exception:
+            pass
 
     # Check if we're already in an async context
     try:
@@ -274,9 +347,12 @@ def fetch_page_content(urls: list[str]) -> dict:
             new_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(new_loop)
             try:
-                return new_loop.run_until_complete(_crawl_all(urls))
+                result = new_loop.run_until_complete(_crawl_all(urls))
+                # Wait for any lingering Playwright tasks to finish (with timeout)
+                new_loop.run_until_complete(_wait_for_tasks_to_clear(new_loop, timeout=30.0))
+                return result
             finally:
-                new_loop.close()
+                _cleanup_loop(new_loop)
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_in_thread)
