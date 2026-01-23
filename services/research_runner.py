@@ -11,40 +11,16 @@ from google.adk.sessions import InMemorySessionService
 from google.genai import types
 
 from agent_core.agents import research_agent
+from .cleanup import (
+    RESEARCH_HISTORY_DIR,
+    cleanup_failed_run,
+    cleanup_previous_run,
+    clear_agent_notes,
+    clear_token_usage,
+    update_token_usage,
+)
 
 APP_NAME = "ai_news_research"
-
-RESEARCH_HISTORY_DIR = Path(__file__).resolve().parent.parent / "research_history"
-RESEARCH_HISTORY_DIR.mkdir(exist_ok=True)
-
-AGENT_NOTES_DIR = Path(__file__).resolve().parent.parent / "agent_notes"
-
-# File for real-time token usage tracking (read by get_token_budget_info tool)
-TOKEN_USAGE_FILE = RESEARCH_HISTORY_DIR / "current_token_usage.json"
-
-
-def update_token_usage(prompt_tokens: int, total_tokens: int) -> None:
-    """Write current token usage to file for the agent tool to read."""
-    data = {
-        "prompt_token_count": prompt_tokens,
-        "total_token_count": total_tokens,
-        "updated_at": datetime.now().isoformat(),
-    }
-    TOKEN_USAGE_FILE.write_text(json.dumps(data), encoding="utf-8")
-
-
-def clear_token_usage() -> None:
-    """Clear token usage file at start of new run."""
-    if TOKEN_USAGE_FILE.exists():
-        TOKEN_USAGE_FILE.unlink()
-
-
-def clear_agent_notes() -> None:
-    """Clear all agent notes from previous run."""
-    if AGENT_NOTES_DIR.exists():
-        import shutil
-        shutil.rmtree(AGENT_NOTES_DIR)
-    AGENT_NOTES_DIR.mkdir(exist_ok=True)
 
 
 def event_to_dict(event):
@@ -235,6 +211,9 @@ async def run_research_agent() -> tuple[Path, Path]:
 
     Returns:
         Tuple of (md_file_path, trace_file_path)
+
+    Raises:
+        Exception: Re-raises any exception after cleaning up partial outputs.
     """
     import time
 
@@ -242,7 +221,11 @@ async def run_research_agent() -> tuple[Path, Path]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     timestamp_readable = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Clear any stale data from previous run
+    # File paths for this run (tracked for cleanup on failure)
+    trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
+    md_file = RESEARCH_HISTORY_DIR / f"research_{timestamp}.md"
+
+    # Clear token usage and agent notes at start (fresh run)
     clear_token_usage()
     clear_agent_notes()
 
@@ -269,9 +252,6 @@ async def run_research_agent() -> tuple[Path, Path]:
         parts=[types.Part(text="Research the latest AI development news from the past 24 hours as instructed.")],
     )
 
-    # Stream events to disk incrementally to minimize memory usage
-    trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
-
     # Keep only recent event dicts for final text extraction and stats
     # (we only need the last few events for final text, and accumulate stats incrementally)
     recent_events: list[dict] = []
@@ -289,61 +269,71 @@ async def run_research_agent() -> tuple[Path, Path]:
         "final_total_tokens": 0,
     }
 
-    with TraceWriter(trace_file) as trace_writer:
-        async for event in runner.run_async(
-            user_id=user_id,
-            session_id=session_id,
-            new_message=user_message,
-        ):
-            # Write event to disk immediately and get dict representation
-            event_dict = trace_writer.write_event(event)
+    try:
+        # Stream events to disk incrementally to minimize memory usage
+        with TraceWriter(trace_file) as trace_writer:
+            async for event in runner.run_async(
+                user_id=user_id,
+                session_id=session_id,
+                new_message=user_message,
+            ):
+                # Write event to disk immediately and get dict representation
+                event_dict = trace_writer.write_event(event)
 
-            # Keep recent events for final text extraction (sliding window)
-            recent_events.append(event_dict)
-            if len(recent_events) > max_recent_events:
-                recent_events.pop(0)
+                # Keep recent events for final text extraction (sliding window)
+                recent_events.append(event_dict)
+                if len(recent_events) > max_recent_events:
+                    recent_events.pop(0)
 
-            # Update stats incrementally from this event
-            content = event_dict.get("content", {})
-            parts = content.get("parts", []) if content else []
-            for part in parts:
-                if part and part.get("function_call"):
-                    func_name = part["function_call"].get("name", "")
-                    stats["total_tool_calls"] += 1
-                    if func_name == "google_search_agent":
-                        stats["search_agent_calls"] += 1
-                    elif func_name == "fetch_page_content":
-                        stats["fetch_calls"] += 1
-                    elif func_name == "youtube_search_tool":
-                        stats["youtube_search_calls"] += 1
-                    elif func_name == "youtube_viewer_agent":
-                        stats["youtube_viewer_calls"] += 1
-                    elif func_name == "verify_urls":
-                        stats["verify_urls_calls"] += 1
+                # Update stats incrementally from this event
+                content = event_dict.get("content", {})
+                parts = content.get("parts", []) if content else []
+                for part in parts:
+                    if part and part.get("function_call"):
+                        func_name = part["function_call"].get("name", "")
+                        stats["total_tool_calls"] += 1
+                        if func_name == "google_search_agent":
+                            stats["search_agent_calls"] += 1
+                        elif func_name == "fetch_page_content":
+                            stats["fetch_calls"] += 1
+                        elif func_name == "youtube_search_tool":
+                            stats["youtube_search_calls"] += 1
+                        elif func_name == "youtube_viewer_agent":
+                            stats["youtube_viewer_calls"] += 1
+                        elif func_name == "verify_urls":
+                            stats["verify_urls_calls"] += 1
 
-            # Track token usage (last event with usage wins)
-            usage = event_dict.get("usage_metadata")
-            if usage:
-                prompt_tokens = usage.get("prompt_token_count", 0)
-                total_tokens = usage.get("total_token_count", 0)
-                if prompt_tokens:
-                    stats["final_prompt_tokens"] = prompt_tokens
-                    update_token_usage(prompt_tokens, total_tokens)
-                if total_tokens:
-                    stats["final_total_tokens"] = total_tokens
+                # Track token usage (last event with usage wins)
+                usage = event_dict.get("usage_metadata")
+                if usage:
+                    prompt_tokens = usage.get("prompt_token_count", 0)
+                    total_tokens = usage.get("total_token_count", 0)
+                    if prompt_tokens:
+                        stats["final_prompt_tokens"] = prompt_tokens
+                        update_token_usage(prompt_tokens, total_tokens)
+                    if total_tokens:
+                        stats["final_total_tokens"] = total_tokens
 
-    # Calculate run duration
-    run_duration = time.time() - start_time
+        # Calculate run duration
+        run_duration = time.time() - start_time
 
-    # Format stats for markdown
-    stats_md = format_run_stats_md(stats, run_duration)
+        # Format stats for markdown
+        stats_md = format_run_stats_md(stats, run_duration)
 
-    # Extract final text from recent events (memory-efficient)
-    final_text = extract_final_text_from_dicts(recent_events)
-    md_file = RESEARCH_HISTORY_DIR / f"research_{timestamp}.md"
-    write_results_to_md(final_text, md_file, timestamp_readable, stats_md)
+        # Extract final text from recent events (memory-efficient)
+        final_text = extract_final_text_from_dicts(recent_events)
+        write_results_to_md(final_text, md_file, timestamp_readable, stats_md)
 
-    # Clean up token usage file after run completes
-    clear_token_usage()
+        # Success: clean up previous run's files (keep only current run's results)
+        cleanup_previous_run()
 
-    return md_file, trace_file
+        # Clean up token usage file and agent notes after successful run
+        clear_token_usage()
+        clear_agent_notes()
+
+        return md_file, trace_file
+
+    except Exception:
+        # Failed run: clean up THIS run's partial outputs, preserve previous run's results
+        cleanup_failed_run(trace_file, md_file)
+        raise
