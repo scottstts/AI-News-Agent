@@ -48,80 +48,61 @@ def event_to_dict(event):
     return str(event)
 
 
-def extract_final_text(trace: list) -> str:
-    """Extract final output text from trace events."""
-    for event in reversed(trace):
-        if hasattr(event, "content"):
-            content = event.content
-            if hasattr(content, "parts"):
-                for part in content.parts:
-                    if hasattr(part, "text") and part.text:
-                        return part.text
-            elif hasattr(content, "text") and content.text:
-                return content.text
-        if hasattr(event, "model_dump"):
-            d = event.model_dump()
-            if "content" in d and d["content"]:
-                c = d["content"]
-                if "parts" in c:
-                    for p in c["parts"]:
-                        if "text" in p and p["text"]:
-                            return p["text"]
+class TraceWriter:
+    """
+    Incrementally writes trace events to a JSON file to minimize memory usage.
+    Writes events as they arrive instead of accumulating in memory.
+    """
+
+    def __init__(self, trace_file: Path):
+        self.trace_file = trace_file
+        self.event_count = 0
+        self._file = None
+
+    def __enter__(self):
+        self._file = self.trace_file.open("w", encoding="utf-8")
+        self._file.write("[\n")  # Start JSON array
+        return self
+
+    def __exit__(self, exc_type, exc_val, exc_tb):
+        if self._file:
+            self._file.write("\n]")  # Close JSON array
+            self._file.close()
+            self._file = None
+
+    def write_event(self, event) -> dict:
+        """
+        Write a single event to the trace file and return its dict representation.
+        Returns the dict for immediate use (e.g., stats extraction).
+        """
+        event_dict = event_to_dict(event)
+
+        if self._file:
+            if self.event_count > 0:
+                self._file.write(",\n")
+
+            # Write with indent for readability, using default=str for non-serializable types
+            json_str = json.dumps(event_dict, indent=2, default=str)
+            # Indent each line for proper array formatting
+            indented = "\n".join("  " + line for line in json_str.split("\n"))
+            self._file.write(indented)
+            self._file.flush()  # Ensure data is written to disk
+
+            self.event_count += 1
+
+        return event_dict
+
+
+def extract_final_text_from_dicts(trace_dicts: list) -> str:
+    """Extract final output text from trace event dicts."""
+    for event in reversed(trace_dicts):
+        if "content" in event and event["content"]:
+            c = event["content"]
+            if "parts" in c:
+                for p in c["parts"]:
+                    if p and "text" in p and p["text"]:
+                        return p["text"]
     return "No final text found in trace."
-
-
-def extract_run_stats(trace_data: list) -> dict:
-    """
-    Extract run statistics from trace data.
-
-    Returns:
-        dict with keys: total_tool_calls, search_agent_calls, fetch_calls,
-        youtube_search_calls, youtube_viewer_calls, verify_urls_calls,
-        final_prompt_tokens, final_total_tokens
-    """
-    stats = {
-        "total_tool_calls": 0,
-        "search_agent_calls": 0,
-        "fetch_calls": 0,
-        "youtube_search_calls": 0,
-        "youtube_viewer_calls": 0,
-        "verify_urls_calls": 0,
-        "final_prompt_tokens": 0,
-        "final_total_tokens": 0,
-    }
-
-    for event in trace_data:
-        # Count tool calls from function_call parts
-        content = event.get("content", {})
-        parts = content.get("parts", []) if content else []
-
-        for part in parts:
-            if part and part.get("function_call"):
-                func_name = part["function_call"].get("name", "")
-                stats["total_tool_calls"] += 1
-
-                if func_name == "google_search_agent":
-                    stats["search_agent_calls"] += 1
-                elif func_name == "fetch_page_content":
-                    stats["fetch_calls"] += 1
-                elif func_name == "youtube_search_tool":
-                    stats["youtube_search_calls"] += 1
-                elif func_name == "youtube_viewer_agent":
-                    stats["youtube_viewer_calls"] += 1
-                elif func_name == "verify_urls":
-                    stats["verify_urls_calls"] += 1
-
-        # Track final token usage (last event with usage_metadata wins)
-        usage = event.get("usage_metadata")
-        if usage:
-            prompt_tokens = usage.get("prompt_token_count", 0)
-            total_tokens = usage.get("total_token_count", 0)
-            if prompt_tokens:
-                stats["final_prompt_tokens"] = prompt_tokens
-            if total_tokens:
-                stats["final_total_tokens"] = total_tokens
-
-    return stats
 
 
 def format_run_stats_md(stats: dict, run_duration_seconds: float) -> str:
@@ -277,38 +258,77 @@ async def run_research_agent() -> tuple[Path, Path]:
         parts=[types.Part(text="Research the latest AI development news from the past 24 hours as instructed.")],
     )
 
-    # Collect events while streaming and updating token usage
-    trace = []
-    async for event in runner.run_async(
-        user_id=user_id,
-        session_id=session_id,
-        new_message=user_message,
-    ):
-        trace.append(event)
+    # Stream events to disk incrementally to minimize memory usage
+    trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
 
-        # Update token usage file after each event with usage_metadata
-        if hasattr(event, "usage_metadata") and event.usage_metadata:
-            usage = event.usage_metadata
-            prompt_tokens = getattr(usage, "prompt_token_count", 0) or 0
-            total_tokens = getattr(usage, "total_token_count", 0) or 0
-            if prompt_tokens > 0:
-                update_token_usage(prompt_tokens, total_tokens)
+    # Keep only recent event dicts for final text extraction and stats
+    # (we only need the last few events for final text, and accumulate stats incrementally)
+    recent_events: list[dict] = []
+    max_recent_events = 20  # Keep last N events for final text extraction
+
+    # Accumulate stats incrementally instead of re-processing all events
+    stats = {
+        "total_tool_calls": 0,
+        "search_agent_calls": 0,
+        "fetch_calls": 0,
+        "youtube_search_calls": 0,
+        "youtube_viewer_calls": 0,
+        "verify_urls_calls": 0,
+        "final_prompt_tokens": 0,
+        "final_total_tokens": 0,
+    }
+
+    with TraceWriter(trace_file) as trace_writer:
+        async for event in runner.run_async(
+            user_id=user_id,
+            session_id=session_id,
+            new_message=user_message,
+        ):
+            # Write event to disk immediately and get dict representation
+            event_dict = trace_writer.write_event(event)
+
+            # Keep recent events for final text extraction (sliding window)
+            recent_events.append(event_dict)
+            if len(recent_events) > max_recent_events:
+                recent_events.pop(0)
+
+            # Update stats incrementally from this event
+            content = event_dict.get("content", {})
+            parts = content.get("parts", []) if content else []
+            for part in parts:
+                if part and part.get("function_call"):
+                    func_name = part["function_call"].get("name", "")
+                    stats["total_tool_calls"] += 1
+                    if func_name == "google_search_agent":
+                        stats["search_agent_calls"] += 1
+                    elif func_name == "fetch_page_content":
+                        stats["fetch_calls"] += 1
+                    elif func_name == "youtube_search_tool":
+                        stats["youtube_search_calls"] += 1
+                    elif func_name == "youtube_viewer_agent":
+                        stats["youtube_viewer_calls"] += 1
+                    elif func_name == "verify_urls":
+                        stats["verify_urls_calls"] += 1
+
+            # Track token usage (last event with usage wins)
+            usage = event_dict.get("usage_metadata")
+            if usage:
+                prompt_tokens = usage.get("prompt_token_count", 0)
+                total_tokens = usage.get("total_token_count", 0)
+                if prompt_tokens:
+                    stats["final_prompt_tokens"] = prompt_tokens
+                    update_token_usage(prompt_tokens, total_tokens)
+                if total_tokens:
+                    stats["final_total_tokens"] = total_tokens
 
     # Calculate run duration
     run_duration = time.time() - start_time
 
-    # Save trace
-    trace_file = RESEARCH_HISTORY_DIR / f"trace_{timestamp}.json"
-    trace_data = [event_to_dict(e) for e in trace]
-    with trace_file.open("w", encoding="utf-8") as f:
-        json.dump(trace_data, f, indent=2, default=str)
-
-    # Extract run stats from trace
-    stats = extract_run_stats(trace_data)
+    # Format stats for markdown
     stats_md = format_run_stats_md(stats, run_duration)
 
-    # Save markdown results with stats
-    final_text = extract_final_text(trace)
+    # Extract final text from recent events (memory-efficient)
+    final_text = extract_final_text_from_dicts(recent_events)
     md_file = RESEARCH_HISTORY_DIR / f"research_{timestamp}.md"
     write_results_to_md(final_text, md_file, timestamp_readable, stats_md)
 
@@ -316,11 +336,3 @@ async def run_research_agent() -> tuple[Path, Path]:
     clear_token_usage()
 
     return md_file, trace_file
-
-
-def get_latest_research_file() -> Path | None:
-    """Get the most recent research markdown file."""
-    md_files = list(RESEARCH_HISTORY_DIR.glob("research_*.md"))
-    if not md_files:
-        return None
-    return max(md_files, key=lambda p: p.stat().st_mtime)

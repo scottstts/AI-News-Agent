@@ -85,9 +85,30 @@ def get_previous_research_result() -> str:
     except Exception as e:
         return f"Error reading previous research result from {latest_file}: {str(e)}"
 
+# Content size limit for fetched pages (in characters) - ~50KB of text
+MAX_CONTENT_SIZE = 50000
+
+
+def _truncate_content(content: str, max_size: int = MAX_CONTENT_SIZE) -> str:
+    """Truncate content to max size, preserving complete sentences where possible."""
+    if not content or len(content) <= max_size:
+        return content
+
+    # Try to cut at a sentence boundary
+    truncated = content[:max_size]
+    last_period = truncated.rfind('. ')
+    last_newline = truncated.rfind('\n')
+    cut_point = max(last_period, last_newline)
+
+    if cut_point > max_size * 0.8:  # Only use boundary if it's not too far back
+        return truncated[:cut_point + 1] + "\n\n[Content truncated...]"
+    return truncated + "\n\n[Content truncated...]"
+
+
 def fetch_page_content(urls: list[str]) -> dict:
     """
     A tool for the agent to fetch page content from a list of URLs, and organize it in an LLM-friendly way.
+    Optimized for low-memory environments by processing URLs one at a time with browser restart.
 
     Args:
         urls (list[str]): A list of URLs to fetch content from.
@@ -107,27 +128,50 @@ def fetch_page_content(urls: list[str]) -> dict:
         os.environ["CRAWL4_AI_BASE_DIRECTORY"] = crawl_base_dir
     os.makedirs(crawl_base_dir, exist_ok=True)
 
-    async def _crawl(target_urls: List[str]) -> List[Dict[str, Any]]:
+    async def _crawl_single_url(url: str) -> Dict[str, Any]:
+        """Crawl a single URL with its own browser instance for memory efficiency."""
         from crawl4ai import (
             AsyncWebCrawler,
+            BrowserConfig,
             CrawlerRunConfig,
             CacheMode,
             DefaultMarkdownGenerator,
             PruningContentFilter,
         )
 
-        results: List[Dict[str, Any]] = []
+        # Memory-optimized browser configuration for low-RAM environments
+        browser_config = BrowserConfig(
+            headless=True,
+            verbose=False,
+            extra_args=[
+                "--disable-dev-shm-usage",  # Use /tmp instead of /dev/shm (critical for low RAM)
+                "--single-process",          # Run in single process to reduce memory
+                "--no-zygote",               # Disable zygote process
+                "--disable-gpu",             # Disable GPU acceleration
+                "--disable-extensions",      # No extensions
+                "--disable-plugins",         # No plugins
+                "--disable-software-rasterizer",
+                "--disable-background-networking",
+                "--disable-sync",
+                "--disable-translate",
+                "--no-first-run",
+                "--safebrowsing-disable-auto-update",
+                "--js-flags=--max-old-space-size=128",  # Limit JS heap to 128MB
+            ],
+        )
 
-        # Use BYPASS to avoid stale cache; caller cares about fresh content
-        # Prefer fit_html-based markdown (pruned) and suppress links/media noise
+        # Aggressive content pruning - prioritize text, omit noise
         md_generator = DefaultMarkdownGenerator(
             content_filter=PruningContentFilter(
-                threshold=0.48,  # More aggressive pruning for cleaner content
+                threshold=0.55,  # More aggressive pruning for cleaner/smaller content
                 threshold_type="fixed",
             ),
             options={
                 "ignore_links": True,
                 "ignore_images": True,
+                "ignore_videos": True,
+                "ignore_audio": True,
+                "ignore_forms": True,
                 "body_width": 0,
             },
             content_source="fit_html",
@@ -140,70 +184,80 @@ def fetch_page_content(urls: list[str]) -> dict:
             stream=False,
             verbose=False,
             markdown_generator=md_generator,
+            # Skip non-text content to save memory
+            excluded_tags=["script", "style", "noscript", "iframe", "svg", "canvas", "video", "audio", "img", "picture", "figure"],
+            remove_overlay_elements=True,
         )
 
         # Browser-like headers to avoid bot detection
         headers = {
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.5",
         }
 
-        async with AsyncWebCrawler(
-            base_directory=crawl_base_dir,
-            headers=headers,
-            page_timeout=30000,
-        ) as crawler:
-            for url in target_urls:
-                try:
-                    crawl_container = await crawler.arun(url=url, config=run_config)
-                    # arun returns CrawlResultContainer with single CrawlResult
-                    crawl_result = crawl_container[0] if len(crawl_container) else None
+        try:
+            # Each URL gets its own browser instance that is fully closed after use
+            async with AsyncWebCrawler(
+                config=browser_config,
+                base_directory=crawl_base_dir,
+                headers=headers,
+            ) as crawler:
+                crawl_container = await crawler.arun(url=url, config=run_config)
+                crawl_result = crawl_container[0] if len(crawl_container) else None
 
-                    if crawl_result and crawl_result.success:
-                        content_text = ""
-                        if crawl_result.markdown:
-                            # Try fit_markdown first (best quality), then raw_markdown, then fallback to cleaned_html
-                            content_text = getattr(
-                                crawl_result.markdown,
-                                "fit_markdown",
-                                None,
-                            ) or getattr(
-                                crawl_result.markdown,
-                                "raw_markdown",
-                                None,
-                            ) or getattr(
-                                crawl_result,
-                                "cleaned_html",
-                                str(crawl_result.markdown),
-                            )
+                if crawl_result and crawl_result.success:
+                    content_text = ""
+                    if crawl_result.markdown:
+                        # Try fit_markdown first (best quality), then raw_markdown
+                        content_text = getattr(
+                            crawl_result.markdown,
+                            "fit_markdown",
+                            None,
+                        ) or getattr(
+                            crawl_result.markdown,
+                            "raw_markdown",
+                            None,
+                        ) or ""
 
-                        # Fallback to cleaned_html if markdown is empty
-                        if not content_text and hasattr(crawl_result, "cleaned_html"):
-                            content_text = crawl_result.cleaned_html
+                    # Fallback to cleaned_html if markdown is empty
+                    if not content_text and hasattr(crawl_result, "cleaned_html"):
+                        content_text = crawl_result.cleaned_html or ""
 
-                        results.append({
-                            "url": url,
-                            "redirected_url": getattr(crawl_result, "redirected_url", None) or url,
-                            "title": (crawl_result.metadata or {}).get("title") if crawl_result.metadata else None,
-                            "status": "success",
-                            "status_code": getattr(crawl_result, "status_code", None),
-                            "content": content_text.strip() if content_text else "",
-                        })
-                    else:
-                        error_message = getattr(crawl_result, "error_message", "Unknown error") if crawl_result else "Empty crawl result"
-                        results.append({
-                            "url": url,
-                            "status": "failure",
-                            "error": error_message,
-                        })
-                except Exception as e:
-                    results.append({
+                    # Apply content size limit
+                    content_text = _truncate_content(content_text.strip()) if content_text else ""
+
+                    return {
+                        "url": url,
+                        "redirected_url": getattr(crawl_result, "redirected_url", None) or url,
+                        "title": (crawl_result.metadata or {}).get("title") if crawl_result.metadata else None,
+                        "status": "success",
+                        "status_code": getattr(crawl_result, "status_code", None),
+                        "content": content_text,
+                    }
+                else:
+                    error_message = getattr(crawl_result, "error_message", "Unknown error") if crawl_result else "Empty crawl result"
+                    return {
                         "url": url,
                         "status": "failure",
-                        "error": str(e),
-                    })
+                        "error": error_message,
+                    }
+        except Exception as e:
+            return {
+                "url": url,
+                "status": "failure",
+                "error": str(e),
+            }
 
+    async def _crawl_all(target_urls: List[str]) -> List[Dict[str, Any]]:
+        """Process URLs one at a time to minimize peak memory usage."""
+        results: List[Dict[str, Any]] = []
+        for url in target_urls:
+            result = await _crawl_single_url(url)
+            results.append(result)
+            # Force garbage collection between URLs to free browser memory
+            import gc
+            gc.collect()
         return results
 
     # Check if we're already in an async context
@@ -220,17 +274,17 @@ def fetch_page_content(urls: list[str]) -> dict:
             new_loop = asyncio.new_event_loop()
             asyncio.set_event_loop(new_loop)
             try:
-                return new_loop.run_until_complete(_crawl(urls))
+                return new_loop.run_until_complete(_crawl_all(urls))
             finally:
                 new_loop.close()
 
-        with concurrent.futures.ThreadPoolExecutor() as executor:
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_in_thread)
             crawl_results = future.result()
     else:
         # Not in async context - can use asyncio.run directly
         try:
-            crawl_results = asyncio.run(_crawl(urls))
+            crawl_results = asyncio.run(_crawl_all(urls))
         except Exception as e:
             return [{"url": None, "status": "failure", "error": f"Error running crawler: {str(e)}"}]
 
