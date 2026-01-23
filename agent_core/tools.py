@@ -414,3 +414,124 @@ def youtube_search_tool(
             "status": "failure",
             "report": f"Error searching YouTube: {str(e)}"
         }
+
+
+# Agent notes directory
+AGENT_NOTES_DIR = os.path.join(os.path.dirname(os.path.dirname(__file__)), "agent_notes")
+
+
+def take_notes(notes: list[dict]) -> dict:
+    """
+    Save research notes as separate markdown files in agent_notes/ directory.
+    Use this to jot down important findings, thoughts, or reminders during research.
+
+    Args:
+        notes: A list of note objects, each with:
+            - title (str): Used as the filename (will be sanitized)
+            - content (str): The note content
+
+    Returns:
+        dict: Status and list of saved note filenames
+
+    Example:
+        take_notes([
+            {"title": "new_model_release", "content": "GPT-5 announced on Jan 15..."},
+            {"title": "todo_follow_up", "content": "Check Anthropic blog for details"}
+        ])
+    """
+    if not notes:
+        return {"status": "failure", "error": "No notes provided"}
+
+    os.makedirs(AGENT_NOTES_DIR, exist_ok=True)
+
+    saved_files = []
+    errors = []
+
+    for note in notes:
+        title = note.get("title", "").strip()
+        content = note.get("content", "").strip()
+
+        if not title:
+            errors.append("Note missing title, skipped")
+            continue
+        if not content:
+            errors.append(f"Note '{title}' has no content, skipped")
+            continue
+
+        # Sanitize filename: replace spaces/special chars, ensure .md extension
+        safe_title = "".join(c if c.isalnum() or c in "-_" else "_" for c in title)
+        safe_title = safe_title[:100]  # Limit filename length
+        filename = f"{safe_title}.md"
+        filepath = os.path.join(AGENT_NOTES_DIR, filename)
+
+        try:
+            with open(filepath, "w", encoding="utf-8") as f:
+                f.write(f"# {title}\n\n{content}")
+            saved_files.append(filename)
+        except Exception as e:
+            errors.append(f"Failed to save '{title}': {str(e)}")
+
+    result = {
+        "status": "success" if saved_files else "failure",
+        "saved_notes": saved_files,
+    }
+    if errors:
+        result["errors"] = errors
+
+    return result
+
+
+def read_notes(mode: str = "list", filenames: list[str] = None) -> dict:
+    """
+    Read research notes from agent_notes/ directory.
+
+    Args:
+        mode: Either "list" (returns all note filenames) or "content" (returns note contents)
+        filenames: Required when mode="content". List of note filenames to read.
+
+    Returns:
+        dict: In "list" mode, returns {"notes": [list of filenames]}
+              In "content" mode, returns {"notes": {filename: content, ...}}
+
+    Example:
+        # First list available notes
+        read_notes(mode="list")
+        # Then read specific ones
+        read_notes(mode="content", filenames=["new_model_release.md", "todo_follow_up.md"])
+    """
+    if not os.path.exists(AGENT_NOTES_DIR):
+        return {"status": "success", "notes": [] if mode == "list" else {}, "message": "No notes directory exists yet"}
+
+    if mode == "list":
+        # List all .md files in the notes directory
+        try:
+            md_files = sorted([f for f in os.listdir(AGENT_NOTES_DIR) if f.endswith(".md")])
+            return {"status": "success", "notes": md_files}
+        except Exception as e:
+            return {"status": "failure", "error": str(e)}
+
+    elif mode == "content":
+        if not filenames:
+            return {"status": "failure", "error": "filenames required for content mode"}
+
+        notes_content = {}
+        errors = []
+
+        for filename in filenames:
+            filepath = os.path.join(AGENT_NOTES_DIR, filename)
+            if not os.path.exists(filepath):
+                errors.append(f"Note '{filename}' not found")
+                continue
+            try:
+                with open(filepath, "r", encoding="utf-8") as f:
+                    notes_content[filename] = f.read()
+            except Exception as e:
+                errors.append(f"Failed to read '{filename}': {str(e)}")
+
+        result = {"status": "success", "notes": notes_content}
+        if errors:
+            result["errors"] = errors
+        return result
+
+    else:
+        return {"status": "failure", "error": f"Invalid mode '{mode}'. Use 'list' or 'content'"}

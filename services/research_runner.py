@@ -17,6 +17,8 @@ APP_NAME = "ai_news_research"
 RESEARCH_HISTORY_DIR = Path(__file__).resolve().parent.parent / "research_history"
 RESEARCH_HISTORY_DIR.mkdir(exist_ok=True)
 
+AGENT_NOTES_DIR = Path(__file__).resolve().parent.parent / "agent_notes"
+
 # File for real-time token usage tracking (read by get_token_budget_info tool)
 TOKEN_USAGE_FILE = RESEARCH_HISTORY_DIR / "current_token_usage.json"
 
@@ -35,6 +37,14 @@ def clear_token_usage() -> None:
     """Clear token usage file at start of new run."""
     if TOKEN_USAGE_FILE.exists():
         TOKEN_USAGE_FILE.unlink()
+
+
+def clear_agent_notes() -> None:
+    """Clear all agent notes from previous run."""
+    if AGENT_NOTES_DIR.exists():
+        import shutil
+        shutil.rmtree(AGENT_NOTES_DIR)
+    AGENT_NOTES_DIR.mkdir(exist_ok=True)
 
 
 def event_to_dict(event):
@@ -232,8 +242,9 @@ async def run_research_agent() -> tuple[Path, Path]:
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
     timestamp_readable = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-    # Clear any stale token usage from previous run
+    # Clear any stale data from previous run
     clear_token_usage()
+    clear_agent_notes()
 
     # Create session service and runner
     session_service = InMemorySessionService()

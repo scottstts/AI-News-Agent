@@ -6,7 +6,7 @@ from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
-from .tools import fetch_page_content, get_date, get_previous_research_result, get_token_budget_info, verify_urls, youtube_search_tool
+from .tools import fetch_page_content, get_date, get_previous_research_result, get_token_budget_info, read_notes, take_notes, verify_urls, youtube_search_tool
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -68,6 +68,8 @@ research_agent = Agent(
         get_date,
         get_previous_research_result,
         get_token_budget_info,
+        read_notes,
+        take_notes,
         verify_urls,
         youtube_search_tool,
     ],
