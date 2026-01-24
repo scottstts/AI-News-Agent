@@ -48,10 +48,85 @@ def get_token_budget_info() -> dict:
         "usage_warning": warning_msg,
     }
 
+def _get_previous_research_from_drive() -> str | None:
+    """
+    Attempt to fetch previous day's research result from Google Drive.
+    Uses the same credentials and folder as the upload service.
+
+    Returns:
+        str: Content of the previous day's research file, or None if not found.
+    """
+    from pathlib import Path
+
+    try:
+        from google.oauth2.credentials import Credentials
+        from google.auth.transport.requests import Request
+        from googleapiclient.http import MediaIoBaseDownload
+        import io
+
+        SCOPES = ["https://www.googleapis.com/auth/drive.file"]
+        TOKEN_PATH = Path(__file__).resolve().parent.parent / "credentials" / "drive_token.json"
+
+        folder_id = os.getenv("GOOGLE_DRIVE_FOLDER_ID")
+        if not folder_id:
+            return None
+
+        if not TOKEN_PATH.exists():
+            return None
+
+        creds = Credentials.from_authorized_user_file(str(TOKEN_PATH), SCOPES)
+
+        if not creds or not creds.valid:
+            if creds and creds.expired and creds.refresh_token:
+                creds.refresh(Request())
+            else:
+                return None
+
+        service = build("drive", "v3", credentials=creds)
+
+        # Calculate yesterday's date in the format used by filenames (YYYYMMDD)
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
+
+        # Search for research files from yesterday in the target folder
+        query = f"'{folder_id}' in parents and name contains 'research_{yesterday}' and name contains '.md' and trashed = false"
+
+        results = service.files().list(
+            q=query,
+            fields="files(id, name, createdTime)",
+            orderBy="createdTime desc",
+            pageSize=1
+        ).execute()
+
+        files = results.get("files", [])
+
+        if not files:
+            return None
+
+        # Download the most recent file from yesterday
+        file_id = files[0]["id"]
+        file_name = files[0]["name"]
+
+        request = service.files().get_media(fileId=file_id)
+        file_content = io.BytesIO()
+        downloader = MediaIoBaseDownload(file_content, request)
+
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        content = file_content.getvalue().decode("utf-8")
+        return f"[Retrieved from Google Drive: {file_name}]\n\n{content}"
+
+    except Exception:
+        # Silently fail and return None - caller will handle the fallback message
+        return None
+
+
 def get_previous_research_result() -> str:
     """
     Look for the previous research result from storage.
-    Reads the single MD file in research_history/ directory.
+    First checks local research_history/ directory, then falls back to Google Drive
+    to fetch the previous day's research result.
 
     Returns:
         str: The content of the previous research result, or an error message if not found.
@@ -60,30 +135,36 @@ def get_previous_research_result() -> str:
 
     # Ensure the directory exists
     if not os.path.exists(research_dir):
-        return "No previous research results available."
+        os.makedirs(research_dir, exist_ok=True)
 
     # Find all markdown files in the directory
     md_files = [f for f in os.listdir(research_dir) if f.endswith('.md')]
 
-    if len(md_files) == 0:
-        return "No previous research results found. Start without previous reference."
+    # If local files exist, use them (existing behavior)
+    if md_files:
+        if len(md_files) > 1:
+            # Sort by modification time to get the most recent one
+            md_files_with_time = [(f, os.path.getmtime(os.path.join(research_dir, f))) for f in md_files]
+            md_files_with_time.sort(key=lambda x: x[1], reverse=True)
+            latest_file = md_files_with_time[0][0]
+        else:
+            latest_file = md_files[0]
 
-    if len(md_files) > 1:
-        # Sort by modification time to get the most recent one
-        md_files_with_time = [(f, os.path.getmtime(os.path.join(research_dir, f))) for f in md_files]
-        md_files_with_time.sort(key=lambda x: x[1], reverse=True)
-        latest_file = md_files_with_time[0][0]
-    else:
-        latest_file = md_files[0]
+        # Read the file content
+        file_path = os.path.join(research_dir, latest_file)
+        try:
+            with open(file_path, 'r', encoding='utf-8') as f:
+                content = f.read()
+            return content
+        except Exception as e:
+            return f"Error reading previous research result from {latest_file}: {str(e)}"
 
-    # Read the file content
-    file_path = os.path.join(research_dir, latest_file)
-    try:
-        with open(file_path, 'r', encoding='utf-8') as f:
-            content = f.read()
-        return content
-    except Exception as e:
-        return f"Error reading previous research result from {latest_file}: {str(e)}"
+    # No local files found - try to fetch from Google Drive (previous day's result)
+    drive_content = _get_previous_research_from_drive()
+    if drive_content:
+        return drive_content
+
+    return "No previous research results found. Start without previous reference."
 
 # Content size limit for fetched pages (in characters) - ~50KB of text
 MAX_CONTENT_SIZE = 50000
