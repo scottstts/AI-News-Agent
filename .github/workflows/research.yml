@@ -64,5 +64,34 @@ jobs:
           mkdir -p research_history
           mkdir -p agent_notes
 
-      - name: Run research agent
-        run: python3 app.py --now
+      - name: Run research agent with token monitoring
+        run: |
+          # Start background process to print token usage every minute
+          (
+            while true; do
+              sleep 60
+              if [ -f "research_history/current_token_usage.json" ]; then
+                echo "=== Token Usage ($(date '+%H:%M:%S')) ==="
+                cat research_history/current_token_usage.json | python3 -m json.tool 2>/dev/null || cat research_history/current_token_usage.json
+                echo "================================"
+              fi
+            done
+          ) &
+          MONITOR_PID=$!
+
+          # Run the agent
+          python3 app.py --now
+          EXIT_CODE=$?
+
+          # Stop the monitoring process
+          kill $MONITOR_PID 2>/dev/null || true
+
+          # Print final token usage
+          echo "=== Final Token Usage ==="
+          if [ -f "research_history/current_token_usage.json" ]; then
+            cat research_history/current_token_usage.json | python3 -m json.tool 2>/dev/null || echo "File was cleared (run completed)"
+          else
+            echo "Token usage file not found (run completed)"
+          fi
+
+          exit $EXIT_CODE
