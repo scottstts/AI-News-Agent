@@ -3,10 +3,8 @@
 import asyncio
 import logging
 import os
-import signal
 import sys
 import warnings
-from datetime import datetime
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.cron import CronTrigger
