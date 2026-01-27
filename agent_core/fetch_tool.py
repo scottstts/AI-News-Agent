@@ -178,7 +178,6 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
         A dict with 'web_page_content' (list of results) and 'token_usage_info'.
     """
     import random
-    import time as time_module
 
     # Basic validation
     if not urls:
@@ -373,21 +372,6 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
             "error": f"Browser crawl failed: {last_error}; Requests fallback: {fallback_result.get('error', 'unknown')}",
         }
 
-    async def _wait_for_tasks_to_clear(loop: asyncio.AbstractEventLoop, timeout: float = 30.0) -> None:
-        """Wait for all pending tasks (except current) to complete, with timeout."""
-        current_task = asyncio.current_task(loop)
-        start = time_module.monotonic()
-        while True:
-            pending = [t for t in asyncio.all_tasks(loop) if t is not current_task and not t.done()]
-            if not pending:
-                break
-            if time_module.monotonic() - start > timeout:
-                for task in pending:
-                    task.cancel()
-                await asyncio.gather(*pending, return_exceptions=True)
-                break
-            await asyncio.sleep(0.05)
-
     async def _crawl_all_parallel(target_urls: List[str], max_concurrent: int) -> List[Dict[str, Any]]:
         """Process URLs in parallel with controlled concurrency."""
         semaphore = asyncio.Semaphore(max_concurrent)
@@ -408,47 +392,6 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
 
         return processed_results
 
-    def _cleanup_loop(loop: asyncio.AbstractEventLoop) -> None:
-        """
-        Comprehensive event loop cleanup that handles subprocess transports.
-        This prevents 'Event loop is closed' errors from Playwright on Linux.
-        """
-        import gc
-
-        try:
-            pending = asyncio.all_tasks(loop)
-            for task in pending:
-                task.cancel()
-            if pending:
-                loop.run_until_complete(asyncio.gather(*pending, return_exceptions=True))
-        except Exception:
-            pass
-
-        try:
-            loop.run_until_complete(loop.shutdown_asyncgens())
-        except Exception:
-            pass
-
-        try:
-            loop.run_until_complete(loop.shutdown_default_executor())
-        except Exception:
-            pass
-
-        gc.collect()
-
-        try:
-            loop.run_until_complete(asyncio.sleep(0))
-        except Exception:
-            pass
-
-        gc.collect()
-        loop.close()
-
-        try:
-            asyncio.set_event_loop(None)
-        except Exception:
-            pass
-
     # Check if we're already in an async context
     try:
         loop = asyncio.get_running_loop()
@@ -460,14 +403,7 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
         import concurrent.futures
 
         def _run_in_thread():
-            new_loop = asyncio.new_event_loop()
-            asyncio.set_event_loop(new_loop)
-            try:
-                result = new_loop.run_until_complete(_crawl_all_parallel(urls, max_parallel))
-                new_loop.run_until_complete(_wait_for_tasks_to_clear(new_loop, timeout=30.0))
-                return result
-            finally:
-                _cleanup_loop(new_loop)
+            return asyncio.run(_crawl_all_parallel(urls, max_parallel))
 
         with concurrent.futures.ThreadPoolExecutor(max_workers=1) as executor:
             future = executor.submit(_run_in_thread)
