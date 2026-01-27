@@ -56,7 +56,9 @@ async def daily_research_task():
         # Upload to Google Drive
         try:
             drive_file_id = upload_to_drive(md_file)
-            logger.info(f"Uploaded to Google Drive: {drive_file_id}")
+            logger.info(f"Uploaded research md to Google Drive: {drive_file_id}")
+            trace_file_id = upload_to_drive(trace_file)
+            logger.info(f"Uploaded trace JSON to Google Drive: {trace_file_id}")
         except Exception as e:
             logger.error(f"Google Drive upload failed: {e}")
 

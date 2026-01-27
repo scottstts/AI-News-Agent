@@ -46,13 +46,74 @@ def get_token_budget_info() -> dict:
         "usage_warning": warning_msg,
     }
 
-def _get_previous_research_from_drive() -> str | None:
+def _extract_news_from_trace(trace_content: str) -> list | None:
     """
-    Attempt to fetch previous day's research result from Google Drive.
+    Extract the 'news' array from trace JSON content.
+    Uses the same logic as extract_final_text_from_dicts in research_runner.py.
+
+    Args:
+        trace_content: The raw JSON string of the trace file (a JSON array of events).
+
+    Returns:
+        list: The 'news' array from the final output, or None if not found.
+    """
+    import json
+    import re
+
+    try:
+        trace_events = json.loads(trace_content)
+    except json.JSONDecodeError:
+        return None
+
+    # Extract final text from trace events (same logic as extract_final_text_from_dicts)
+    final_text = None
+    for event in reversed(trace_events):
+        if "content" in event and event["content"]:
+            c = event["content"]
+            if "parts" in c:
+                for p in c["parts"]:
+                    if p and "text" in p and p["text"]:
+                        final_text = p["text"]
+                        break
+                if final_text:
+                    break
+
+    if not final_text:
+        return None
+
+    # Extract JSON from the final text (may be in code blocks)
+    # Try to find JSON in code blocks first
+    json_block_pattern = r"```(?:json)?\s*(\{[\s\S]*?\})\s*```"
+    match = re.search(json_block_pattern, final_text)
+    if match:
+        try:
+            parsed = json.loads(match.group(1))
+            if "news" in parsed:
+                return parsed["news"]
+        except json.JSONDecodeError:
+            pass
+
+    # Try to find raw JSON object
+    json_pattern = r"\{[\s\S]*\"news\"[\s\S]*\}"
+    match = re.search(json_pattern, final_text)
+    if match:
+        try:
+            parsed = json.loads(match.group(0))
+            if "news" in parsed:
+                return parsed["news"]
+        except json.JSONDecodeError:
+            pass
+
+    return None
+
+
+def _get_previous_research_from_drive() -> list | None:
+    """
+    Attempt to fetch previous day's research news from Google Drive trace file.
     Uses the same credentials and folder as the upload service.
 
     Returns:
-        str: Content of the previous day's research file, or None if not found.
+        list: The 'news' array from the previous day's trace, or None if not found.
     """
     from pathlib import Path
 
@@ -85,8 +146,8 @@ def _get_previous_research_from_drive() -> str | None:
         # Calculate yesterday's date in the format used by filenames (YYYYMMDD)
         yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
 
-        # Search for research files from yesterday in the target folder
-        query = f"'{folder_id}' in parents and name contains 'research_{yesterday}' and name contains '.md' and trashed = false"
+        # Search for trace files from yesterday in the target folder
+        query = f"'{folder_id}' in parents and name contains 'trace_{yesterday}' and name contains '.json' and trashed = false"
 
         results = service.files().list(
             q=query,
@@ -100,9 +161,8 @@ def _get_previous_research_from_drive() -> str | None:
         if not files:
             return None
 
-        # Download the most recent file from yesterday
+        # Download the most recent trace file from yesterday
         file_id = files[0]["id"]
-        file_name = files[0]["name"]
 
         request = service.files().get_media(fileId=file_id)
         file_content = io.BytesIO()
@@ -113,7 +173,7 @@ def _get_previous_research_from_drive() -> str | None:
             _, done = downloader.next_chunk()
 
         content = file_content.getvalue().decode("utf-8")
-        return f"[Retrieved from Google Drive: {file_name}]\n\n{content}"
+        return _extract_news_from_trace(content)
 
     except Exception:
         # Silently fail and return None - caller will handle the fallback message
@@ -122,47 +182,58 @@ def _get_previous_research_from_drive() -> str | None:
 
 def get_previous_research_result() -> str:
     """
-    Look for the previous research result from storage.
-    First checks local research_history/ directory, then falls back to Google Drive
-    to fetch the previous day's research result.
+    Look for yesterday's research news from storage.
+    First checks local research_history/ directory for trace JSON files from yesterday,
+    then falls back to Google Drive to fetch yesterday's trace.
 
     Returns:
-        str: The content of the previous research result, or an error message if not found.
+        str: JSON string of the 'news' array from yesterday's research, or an error message if not found.
     """
+    import json
+
     research_dir = os.path.join(os.getcwd(), "research_history")
 
     # Ensure the directory exists
     if not os.path.exists(research_dir):
         os.makedirs(research_dir, exist_ok=True)
 
-    # Find all markdown files in the directory
-    md_files = [f for f in os.listdir(research_dir) if f.endswith('.md')]
+    # Calculate yesterday's date in the format used by filenames (YYYYMMDD)
+    yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y%m%d")
 
-    # If local files exist, use them (existing behavior)
-    if md_files:
-        if len(md_files) > 1:
-            # Sort by modification time to get the most recent one
-            md_files_with_time = [(f, os.path.getmtime(os.path.join(research_dir, f))) for f in md_files]
-            md_files_with_time.sort(key=lambda x: x[1], reverse=True)
-            latest_file = md_files_with_time[0][0]
+    # Find trace JSON files from yesterday only
+    trace_files = [
+        f for f in os.listdir(research_dir)
+        if f.startswith(f'trace_{yesterday}') and f.endswith('.json')
+    ]
+
+    # If local trace files from yesterday exist, use them
+    if trace_files:
+        if len(trace_files) > 1:
+            # Sort by modification time to get the most recent one from yesterday
+            trace_files_with_time = [(f, os.path.getmtime(os.path.join(research_dir, f))) for f in trace_files]
+            trace_files_with_time.sort(key=lambda x: x[1], reverse=True)
+            latest_file = trace_files_with_time[0][0]
         else:
-            latest_file = md_files[0]
+            latest_file = trace_files[0]
 
-        # Read the file content
+        # Read the trace file and extract news
         file_path = os.path.join(research_dir, latest_file)
         try:
             with open(file_path, 'r', encoding='utf-8') as f:
                 content = f.read()
-            return content
+            news = _extract_news_from_trace(content)
+            if news:
+                return json.dumps(news, indent=2)
+            return "No news found in yesterday's trace file."
         except Exception as e:
-            return f"Error reading previous research result from {latest_file}: {str(e)}"
+            return f"Error reading previous trace from {latest_file}: {str(e)}"
 
-    # No local files found - try to fetch from Google Drive (previous day's result)
-    drive_content = _get_previous_research_from_drive()
-    if drive_content:
-        return drive_content
+    # No local files from yesterday found - try to fetch from Google Drive
+    drive_news = _get_previous_research_from_drive()
+    if drive_news:
+        return json.dumps(drive_news, indent=2)
 
-    return "No previous research results found. Start without previous reference."
+    return "No previous research results found from yesterday. Start without previous reference."
 
 
 def verify_urls(urls: list[str]) -> list[dict]:

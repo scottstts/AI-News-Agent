@@ -40,6 +40,12 @@ def get_drive_service():
     return build("drive", "v3", credentials=creds)
 
 
+MIME_TYPES = {
+    ".md": "text/markdown",
+    ".json": "application/json",
+}
+
+
 def upload_to_drive(file_path: Path, folder_id: str | None = None) -> str:
     """
     Upload a file to Google Drive.
@@ -62,7 +68,8 @@ def upload_to_drive(file_path: Path, folder_id: str | None = None) -> str:
         "parents": [folder_id],
     }
 
-    media = MediaFileUpload(str(file_path), mimetype="text/markdown")
+    mimetype = MIME_TYPES.get(file_path.suffix, "application/octet-stream")
+    media = MediaFileUpload(str(file_path), mimetype=mimetype)
 
     file = service.files().create(
         body=file_metadata,
