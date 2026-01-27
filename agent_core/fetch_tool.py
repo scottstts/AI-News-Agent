@@ -1,4 +1,6 @@
 import asyncio
+import threading
+import tempfile
 from typing import List, Dict, Any, Tuple
 from collections import defaultdict
 from urllib.parse import urlparse
@@ -21,45 +23,68 @@ DOMAIN_MAX_CONCURRENT = 2  # Max concurrent requests per domain
 
 # Wayback Machine rate limiting (archive.org can block aggressive scraping)
 ARCHIVE_MIN_DELAY = 3.0  # Minimum seconds between archive.org requests
+_archive_lock = threading.Lock()  # Thread-safe lock for archive rate limiting
 _archive_last_request_time = 0.0  # Module-level tracker for archive.org rate limiting
 
 # Archive cache configuration (avoids re-hitting archive.org for same URLs)
 ARCHIVE_CACHE_DIR = ".archive_cache"
 ARCHIVE_CACHE_TTL = 86400  # Cache TTL in seconds (24 hours)
 
+# Domain-specific rate limiting (some domains are more aggressive with blocking)
+DOMAIN_SPECIFIC_DELAYS = {
+    "github.com": (5.0, 8.0),      # GitHub is aggressive with rate limiting
+    "raw.githubusercontent.com": (5.0, 8.0),
+    "api.github.com": (10.0, 15.0),  # API is stricter
+}
+
+# Known domains that won't work without real browser auth - short-circuit these
+KNOWN_BLOCKED_DOMAINS = {
+    "linkedin.com": "Requires authentication",
+    "www.linkedin.com": "Requires authentication",
+    "medium.com": "Paywall - try archive only",
+}
+
+# Module-level curl_cffi session pool (lazy init for connection reuse)
+_curl_session = None
+_curl_session_lock = threading.Lock()
+
 # User-Agent + TLS fingerprint pairs (matched by OS for consistency)
 # Format: (User-Agent, curl_cffi impersonate profile)
-# Updated to 2025-era browser versions for better compatibility
-# NOTE: curl_cffi impersonate profiles lag behind UA versions. When curl_cffi releases
-# newer profiles (e.g., chrome131, chrome132), update the second element of each tuple.
+# Updated to 2025/2026-era browser versions with matching TLS fingerprint profiles
+# curl_cffi 0.8+ supports: chrome131, chrome133a, chrome136, safari180, safari184, safari260,
+# safari180_ios, safari184_ios, safari260_ios, chrome131_android
 # Check available profiles: https://github.com/yifeikong/curl_cffi#supported-impersonate-targets
 USER_AGENT_PROFILES = [
-    # Desktop - Chrome on Mac (2025 versions)
-    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome120"),
-    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36", "chrome120"),
-    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/129.0.0.0 Safari/537.36", "chrome120"),
-    # Desktop - Chrome on Windows (2025 versions)
-    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome120"),
-    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36", "chrome120"),
-    # Desktop - Safari on Mac (2025 versions)
-    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Safari/605.1.15", "safari15_5"),
-    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Safari/605.1.15", "safari15_5"),
+    # Desktop - Chrome on Mac (2025/2026 versions)
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", "chrome136"),
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36", "chrome133a"),
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome131"),
+    # Desktop - Chrome on Windows (2025/2026 versions)
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", "chrome136"),
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/133.0.0.0 Safari/537.36", "chrome133a"),
+    ("Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome131"),
+    # Desktop - Safari on Mac (2025/2026 versions - Safari 18.x and 26.x)
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Safari/605.1.15", "safari260"),
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Safari/605.1.15", "safari184"),
+    ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Safari/605.1.15", "safari180"),
     # Desktop - Chrome on Linux
-    ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome120"),
-    # Mobile - Chrome on Android (2025 versions)
-    ("Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36", "chrome120"),
-    ("Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36", "chrome120"),
-    # Mobile - Safari on iPhone (2025 versions)
-    ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_2 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.2 Mobile/15E148 Safari/604.1", "safari15_5"),
-    ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.1 Mobile/15E148 Safari/604.1", "safari15_5"),
+    ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36", "chrome136"),
+    ("Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36", "chrome131"),
+    # Mobile - Chrome on Android (2025/2026 versions)
+    ("Mozilla/5.0 (Linux; Android 15; Pixel 9) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36", "chrome131_android"),
+    ("Mozilla/5.0 (Linux; Android 14; SM-S928B) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Mobile Safari/537.36", "chrome131_android"),
+    # Mobile - Safari on iPhone (2025/2026 versions)
+    ("Mozilla/5.0 (iPhone; CPU iPhone OS 26_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/26.0 Mobile/15E148 Safari/604.1", "safari260_ios"),
+    ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.4 Mobile/15E148 Safari/604.1", "safari184_ios"),
+    ("Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/18.0 Mobile/15E148 Safari/604.1", "safari180_ios"),
 ]
 
 # Realistic referer headers to mimic traffic from search/social
+# Note: Twitter/X (t.co) removed as it can trigger extra scrutiny on some sites
 REFERER_SOURCES = [
     "https://www.google.com/",
     "https://www.google.com/search?q=",
     "https://www.bing.com/search?q=",
-    "https://t.co/",  # Twitter/X short links
     "https://www.reddit.com/",
     "https://news.ycombinator.com/",
     "https://duckduckgo.com/",
@@ -124,12 +149,33 @@ SOFT_BLOCK_INDICATORS = [
 ]
 
 
+def _get_domain_delays(domain: str) -> Tuple[float, float]:
+    """Get domain-specific rate limit delays, falling back to defaults."""
+    for pattern, delays in DOMAIN_SPECIFIC_DELAYS.items():
+        if pattern in domain:
+            return delays
+    return (DOMAIN_MIN_DELAY, DOMAIN_MAX_DELAY)
+
+
+def _is_known_blocked_domain(url: str) -> Tuple[bool, str | None]:
+    """Check if URL is from a known blocked domain that requires special handling."""
+    try:
+        parsed = urlparse(url)
+        domain = parsed.netloc.lower()
+        for blocked_domain, reason in KNOWN_BLOCKED_DOMAINS.items():
+            if blocked_domain in domain:
+                return True, reason
+    except Exception:
+        pass
+    return False, None
+
+
 class DomainRateLimiter:
     """Rate limiter that ensures we don't overwhelm individual domains."""
 
     def __init__(self, min_delay: float = DOMAIN_MIN_DELAY, max_delay: float = DOMAIN_MAX_DELAY, max_concurrent: int = DOMAIN_MAX_CONCURRENT):
-        self.min_delay = min_delay
-        self.max_delay = max_delay
+        self.default_min_delay = min_delay
+        self.default_max_delay = max_delay
         self.max_concurrent = max_concurrent
         self._last_request_time: Dict[str, float] = defaultdict(float)
         self._domain_semaphores: Dict[str, asyncio.Semaphore] = {}
@@ -157,12 +203,15 @@ class DomainRateLimiter:
 
         await semaphore.acquire()
 
+        # Get domain-specific delays or use defaults
+        min_delay, max_delay = _get_domain_delays(domain)
+
         # Enforce randomized delay between requests to the same domain (more human-like)
         async with self._lock:
             last_time = self._last_request_time[domain]
             now = time.monotonic()
             # Use random jitter between min and max delay for more human-like behavior
-            target_delay = random.uniform(self.min_delay, self.max_delay)
+            target_delay = random.uniform(min_delay, max_delay)
             wait_time = max(0, target_delay - (now - last_time))
             if wait_time > 0:
                 await asyncio.sleep(wait_time)
@@ -314,10 +363,10 @@ def _get_cached_archive_result(url: str) -> Dict[str, Any] | None:
 
 
 def _cache_archive_result(url: str, archive_url: str, title: str | None, content: str) -> None:
-    """Cache a successful archive fetch result."""
+    """Cache a successful archive fetch result using atomic write."""
     os.makedirs(ARCHIVE_CACHE_DIR, exist_ok=True)
     cache_path = _get_archive_cache_path(url)
-    
+
     cache_data = {
         "url": url,
         "archive_url": archive_url,
@@ -325,22 +374,51 @@ def _cache_archive_result(url: str, archive_url: str, title: str | None, content
         "content": content,
         "cached_at": time.time(),
     }
-    
+
     try:
-        with open(cache_path, "w", encoding="utf-8") as f:
-            json.dump(cache_data, f, ensure_ascii=False)
+        # Write to temp file first, then atomic rename to avoid race conditions
+        fd, temp_path = tempfile.mkstemp(dir=ARCHIVE_CACHE_DIR, suffix=".tmp")
+        try:
+            with os.fdopen(fd, 'w', encoding='utf-8') as f:
+                json.dump(cache_data, f, ensure_ascii=False)
+            os.replace(temp_path, cache_path)  # Atomic on POSIX
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(temp_path)
+            except OSError:
+                pass
+            raise
     except OSError:
         # Failed to write cache, not critical
         pass
 
 
-def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
+def _parse_archive_timestamp(timestamp: str | None) -> str | None:
+    """
+    Parse Wayback Machine timestamp (YYYYMMDDHHmmss) into human-readable format.
+    Returns ISO-like date string so agent knows how stale the archive is.
+    """
+    if not timestamp or len(timestamp) < 8:
+        return None
+    try:
+        # Format: YYYYMMDDHHmmss (e.g., 20240115123045)
+        year = timestamp[0:4]
+        month = timestamp[4:6]
+        day = timestamp[6:8]
+        return f"SYSTEM MESSAGE: This piece of content is retrieved from Wayback Machine which could potentially be **stale**. Check its timestamp to consider whether to use it (year-month-day): {year}-{month}-{day}"
+    except (IndexError, ValueError):
+        return None
+
+
+def _fetch_from_archive(url: str, timeout: int = 20, max_retries: int = 1) -> Dict[str, Any]:
     """
     Fetch content from Internet Archive (Wayback Machine) as a fallback.
     Bypasses target site's WAF completely by fetching cached version.
-    Includes rate limiting to avoid being blocked by archive.org.
+    Includes thread-safe rate limiting to avoid being blocked by archive.org.
     Uses local file cache to avoid repeated requests for the same URLs.
     Uses CDX API to find the best snapshot with HTTP 200 status.
+    Returns archive_date in results so agent knows how stale the content might be.
     """
     global _archive_last_request_time
     from curl_cffi import requests as curl_requests
@@ -354,12 +432,13 @@ def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
     # Strip URL fragments - Wayback often has better snapshots without them
     clean_url = url.split('#')[0]
 
-    # Rate limit archive.org requests to avoid being blocked
-    now = time.monotonic()
-    time_since_last = now - _archive_last_request_time
-    if time_since_last < ARCHIVE_MIN_DELAY:
-        time.sleep(ARCHIVE_MIN_DELAY - time_since_last)
-    _archive_last_request_time = time.monotonic()
+    # Thread-safe rate limiting for archive.org requests
+    with _archive_lock:
+        now = time.monotonic()
+        time_since_last = now - _archive_last_request_time
+        if time_since_last < ARCHIVE_MIN_DELAY:
+            time.sleep(ARCHIVE_MIN_DELAY - time_since_last)
+        _archive_last_request_time = time.monotonic()
 
     user_agent, impersonate = _get_matched_profile()
 
@@ -372,7 +451,7 @@ def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
     # Try CDX API to find the best snapshot (most recent with 200 status)
     archive_url = None
     best_timestamp = None
-    
+
     try:
         cdx_url = f"https://web.archive.org/cdx/search/cdx?url={quote(clean_url, safe='')}&output=json&fl=timestamp,statuscode&limit=20"
         cdx_response = curl_requests.get(
@@ -381,7 +460,7 @@ def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
             timeout=10,
             impersonate=impersonate,
         )
-        
+
         if cdx_response.status_code == 200:
             cdx_data = cdx_response.json()
             # First row is header: ["timestamp", "statuscode"]
@@ -391,13 +470,13 @@ def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
                     if len(row) >= 2 and row[1] == "200":
                         best_timestamp = row[0]
                         break
-                
+
                 if best_timestamp:
                     archive_url = f"https://web.archive.org/web/{best_timestamp}/{clean_url}"
     except Exception:
         # CDX lookup failed, fall back to /web/2/
         pass
-    
+
     # Fall back to /web/2/ if CDX didn't find a good snapshot
     if not archive_url:
         archive_url = f"https://web.archive.org/web/2/{clean_url}"
@@ -406,57 +485,80 @@ def _fetch_from_archive(url: str, timeout: int = 20) -> Dict[str, Any]:
     headers["Accept"] = "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8"
     headers["Accept-Encoding"] = "gzip, deflate, br"
 
-    try:
-        response = curl_requests.get(
-            archive_url,
-            headers=headers,
-            timeout=timeout,
-            allow_redirects=True,
-            impersonate=impersonate,
-        )
+    last_error = None
 
-        if response.status_code >= 400:
-            return {
-                "url": url,
-                "status": "failure",
-                "error": f"Archive returned HTTP {response.status_code}",
-            }
-
-        # Parse HTML using shared extractor
+    # Retry loop for archive.org failures
+    for attempt in range(max_retries + 1):
         try:
-            content, title = SimpleHTMLTextExtractor.extract(response.text)
-        except Exception:
-            text = re.sub(r'<[^>]+>', ' ', response.text)
-            text = re.sub(r'\s+', ' ', text).strip()
-            if text and len(text) > 200:
-                truncated_text = _truncate_content(text)
-                _cache_archive_result(url, archive_url, None, truncated_text)
+            response = curl_requests.get(
+                archive_url,
+                headers=headers,
+                timeout=timeout,
+                allow_redirects=True,
+                impersonate=impersonate,
+            )
+
+            if response.status_code >= 400:
+                last_error = f"Archive returned HTTP {response.status_code}"
+                if attempt < max_retries:
+                    time.sleep(2)
+                    continue
+                return {
+                    "url": url,
+                    "status": "failure",
+                    "error": last_error,
+                }
+
+            # Parse HTML using shared extractor
+            try:
+                content, title = SimpleHTMLTextExtractor.extract(response.text)
+            except Exception:
+                text = re.sub(r'<[^>]+>', ' ', response.text)
+                text = re.sub(r'\s+', ' ', text).strip()
+                if text and len(text) > 200:
+                    truncated_text = _truncate_content(text)
+                    _cache_archive_result(url, archive_url, None, truncated_text)
+                    return {
+                        "url": url,
+                        "archive_url": archive_url,
+                        "archive_date": _parse_archive_timestamp(best_timestamp),
+                        "title": None,
+                        "status": "success",
+                        "content": truncated_text,
+                        "fetcher": "archive_regex_fallback",
+                    }
+                last_error = "Archive content parsing failed"
+                if attempt < max_retries:
+                    time.sleep(2)
+                    continue
+                return {"url": url, "status": "failure", "error": last_error}
+
+            if content and len(content) > 200:
+                truncated_content = _truncate_content(content)
+                _cache_archive_result(url, archive_url, title, truncated_content)
                 return {
                     "url": url,
                     "archive_url": archive_url,
-                    "title": None,
+                    "archive_date": _parse_archive_timestamp(best_timestamp),
+                    "title": title,
                     "status": "success",
-                    "content": truncated_text,
-                    "fetcher": "archive_regex_fallback",
+                    "content": truncated_content,
+                    "fetcher": "archive",
                 }
-            return {"url": url, "status": "failure", "error": "Archive content parsing failed"}
 
-        if content and len(content) > 200:
-            truncated_content = _truncate_content(content)
-            _cache_archive_result(url, archive_url, title, truncated_content)
-            return {
-                "url": url,
-                "archive_url": archive_url,
-                "title": title,
-                "status": "success",
-                "content": truncated_content,
-                "fetcher": "archive",
-            }
+            last_error = "Archive returned empty content"
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
+            return {"url": url, "status": "failure", "error": last_error}
 
-        return {"url": url, "status": "failure", "error": "Archive returned empty content"}
+        except Exception as e:
+            last_error = f"Archive fetch failed: {str(e)}"
+            if attempt < max_retries:
+                time.sleep(2)
+                continue
 
-    except Exception as e:
-        return {"url": url, "status": "failure", "error": f"Archive fetch failed: {str(e)}"}
+    return {"url": url, "status": "failure", "error": last_error or "Archive fetch failed"}
 
 
 def _truncate_content(content: str, max_size: int = MAX_CONTENT_SIZE) -> str:
@@ -475,22 +577,32 @@ def _truncate_content(content: str, max_size: int = MAX_CONTENT_SIZE) -> str:
     return truncated + "\n\n[Content truncated...]"
 
 
-def _get_random_user_agent() -> str:
-    """Return a random User-Agent from the pool."""
-    user_agent, _ = _get_matched_profile()
-    return user_agent
+def _get_curl_session():
+    """Get or create a reusable curl_cffi session for connection pooling."""
+    global _curl_session
+    with _curl_session_lock:
+        if _curl_session is None:
+            from curl_cffi import requests as curl_requests
+            _curl_session = curl_requests.Session()
+        return _curl_session
 
 
-def _fetch_with_curl_cffi(url: str, timeout: int = 15) -> Dict[str, Any]:
+def _fetch_with_curl_cffi(url: str, timeout: int = 15, user_agent: str | None = None, impersonate: str | None = None) -> Dict[str, Any]:
     """
     Lightweight fallback fetcher using curl_cffi + basic HTML parsing.
     curl_cffi spoofs TLS fingerprints of real browsers, bypassing most Cloudflare/403 blocks.
     Uses matched User-Agent/TLS profiles and realistic referer headers.
-    """
-    from curl_cffi import requests as curl_requests
+    Uses connection pooling for better performance.
 
-    # Get matched User-Agent and TLS fingerprint profile
-    user_agent, impersonate = _get_matched_profile()
+    Args:
+        url: URL to fetch
+        timeout: Request timeout in seconds
+        user_agent: Optional User-Agent (uses random if not provided)
+        impersonate: Optional TLS impersonate profile (uses matched profile if not provided)
+    """
+    # Get matched User-Agent and TLS fingerprint profile if not provided
+    if user_agent is None or impersonate is None:
+        user_agent, impersonate = _get_matched_profile()
 
     headers = {
         "User-Agent": user_agent,
@@ -516,7 +628,9 @@ def _fetch_with_curl_cffi(url: str, timeout: int = 15) -> Dict[str, Any]:
         headers["Sec-Fetch-Site"] = "none"
 
     try:
-        response = curl_requests.get(
+        # Use session for connection pooling
+        session = _get_curl_session()
+        response = session.get(
             url,
             headers=headers,
             timeout=timeout,
@@ -609,14 +723,16 @@ def _normalize_url(url: str) -> str:
     return url
 
 
-def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
+def fetch_page_content(urls: list[str], max_parallel: int = 3) -> dict:
     """
     A tool for the agent to fetch page content from a list of URLs, and organize it in an LLM-friendly way.
     Uses parallel fetching with retry logic and fallback mechanisms for robustness.
 
     Args:
         urls (list[str]): A list of URLs to fetch content from.
-        max_parallel (int): Maximum number of URLs to fetch in parallel (default: 5).
+        max_parallel (int): Maximum number of URLs to fetch in parallel (default: 3).
+            Note: Each parallel fetch spawns a Chromium instance (~300-500MB RAM each).
+            Default of 3 is conservative for 16GB RAM environments (e.g., GitHub runners).
 
     Returns:
         A dict with 'web_page_content' (list of results) and 'token_usage_info'.
@@ -644,6 +760,7 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
     # Domain rate limiter to prevent 429 errors from hitting same domain too fast
     domain_limiter = DomainRateLimiter(
         min_delay=DOMAIN_MIN_DELAY,
+        max_delay=DOMAIN_MAX_DELAY,
         max_concurrent=DOMAIN_MAX_CONCURRENT
     )
 
@@ -653,6 +770,19 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
         Uses semaphore to limit concurrent browser instances and domain rate limiter
         to prevent overwhelming individual domains.
         """
+        # Check if this is a known blocked domain - skip directly to archive
+        is_blocked_domain, block_reason = _is_known_blocked_domain(url)
+        if is_blocked_domain:
+            # Skip browser and curl_cffi, go straight to archive
+            archive_result = await asyncio.to_thread(_fetch_from_archive, url)
+            if archive_result.get("status") == "success":
+                return archive_result
+            return {
+                "url": url,
+                "status": "failure",
+                "error": f"Known blocked domain ({block_reason}); Archive: {archive_result.get('error', 'failed')}",
+            }
+
         from crawl4ai import (
             AsyncWebCrawler,
             BrowserConfig,
@@ -661,6 +791,10 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
             DefaultMarkdownGenerator,
             PruningContentFilter,
         )
+
+        # Pick profile ONCE per URL - real browsers don't change UA mid-session
+        # This profile will be used consistently across all retries and fallbacks
+        url_user_agent, url_impersonate = _get_matched_profile()
 
         # Randomize viewport for fingerprint evasion
         viewport_width, viewport_height = _get_random_viewport()
@@ -809,14 +943,11 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
             delay_before_return_html=2.5,  # Extra wait for lazy-loaded content after scroll
         )
 
-        # Get matched User-Agent for browser
-        user_agent = _get_random_user_agent()
-
         # Add realistic referer header to mimic search/social traffic
         referer = _get_random_referer()
 
         headers = {
-            "User-Agent": user_agent,
+            "User-Agent": url_user_agent,  # Use consistent profile for this URL
             "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
             "Accept-Language": "en-US,en;q=0.9",
             "Accept-Encoding": "gzip, deflate, br",
@@ -894,18 +1025,20 @@ def fetch_page_content(urls: list[str], max_parallel: int = 5) -> dict:
                 last_error = str(e)
 
             # Exponential backoff before retry with jittered base delay
+            # Note: We keep the same User-Agent across retries (real browsers don't change UA mid-session)
             if attempt < MAX_RETRIES:
                 # Randomize base delay for more human-like timing
                 jittered_base = random.uniform(RETRY_DELAY_BASE * 0.5, RETRY_DELAY_BASE * 1.5)
                 delay = jittered_base * (2 ** attempt) + random.uniform(0, 0.5)
                 await asyncio.sleep(delay)
-                # Rotate User-Agent for retry
-                headers["User-Agent"] = _get_random_user_agent()
 
         # Browser-based crawl failed - try lightweight curl_cffi-based fallback
         # curl_cffi spoofs TLS fingerprints, bypassing most Cloudflare/bot detection
         # Run in thread to avoid blocking the event loop with sync HTTP
-        fallback_result = await asyncio.to_thread(_fetch_with_curl_cffi, url)
+        # Use same UA/TLS profile for consistency (real browsers don't change mid-session)
+        fallback_result = await asyncio.to_thread(
+            _fetch_with_curl_cffi, url, 15, url_user_agent, url_impersonate
+        )
         if fallback_result.get("status") == "success":
             return fallback_result
 

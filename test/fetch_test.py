@@ -37,6 +37,9 @@ from agent_core.fetch_tool import (
     _fetch_with_curl_cffi,
     _fetch_from_archive,
     fetch_page_content,
+    _get_domain_delays,
+    _is_known_blocked_domain,
+    _get_curl_session,
     # Classes
     SimpleHTMLTextExtractor,
     DomainRateLimiter,
@@ -47,6 +50,8 @@ from agent_core.fetch_tool import (
     SOFT_BLOCK_INDICATORS,
     MAX_CONTENT_SIZE,
     ARCHIVE_CACHE_DIR,
+    DOMAIN_SPECIFIC_DELAYS,
+    KNOWN_BLOCKED_DOMAINS,
 )
 
 

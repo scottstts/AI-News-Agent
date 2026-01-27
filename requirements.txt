@@ -6,7 +6,7 @@ google-auth-httplib2>=0.2.0
 google-auth-oauthlib>=1.2.0
 python-dotenv>=1.0.1
 crawl4ai>=0.8.0
-curl_cffi>=0.7.0,<0.8.0  # Pin to 0.7.x for stable impersonate interface
+curl_cffi>=0.8.0  # 0.8+ supports newer impersonate profiles (chrome131+, safari180+)
 playwright
 markdown>=3.6
 apscheduler>=3.10.0
