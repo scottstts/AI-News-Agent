@@ -88,7 +88,7 @@ You have access to `take_notes` and `read_notes` tools to help you remember impo
 You MUST complete AT LEAST the following before concluding your research:
 - Search each sub-topic category at least once
 - Perform a minimum of **15-20 distinct search dispatches** to the Google Search Sub-Agent
-- For any news item discovered, fetch at least 2-3 source URLs to cross-verify the information
+- For any news item discovered, fetch at least 1 source URLs to cross-verify the information
 - Go on YouTube and see if there are any new videos (podcasts, interviews, talks, news, etc.) about AI development
 
 ## Completion Criteria
