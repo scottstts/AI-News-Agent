@@ -39,6 +39,7 @@ Set the following secrets in your repository (Settings → Secrets and variables
 ### API Keys (plain text)
 - `GEMINI_API_KEY` - Google Gemini API key
 - `OPENAI_API_KEY` - OpenAI API key
+- `OPENROUTER_API_KEY` - OpenRouter API key
 - `GCP_SERVICES_API_KEY` - GCP API key (for YouTube Data API)
 - `GOOGLE_DRIVE_FOLDER_ID` - Target Google Drive folder ID
 - `RECIPIENT_EMAIL` - Email address to receive research results
