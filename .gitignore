@@ -7,3 +7,5 @@ test_results/
 .crawl4ai_cache/
 credentials/
 agent_notes/
+.archive_cache/
+.pytest_cache/

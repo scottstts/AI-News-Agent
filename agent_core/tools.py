@@ -4,7 +4,7 @@ from dotenv import load_dotenv
 import os
 
 # GPT 5.2 has hard 272000 max input token limit
-MAX_INPUT_TOKENS = 200000
+MAX_INPUT_TOKENS = 240000
 
 def get_date() -> str:
     """Returns the current date in YYYY-MM-DD format."""

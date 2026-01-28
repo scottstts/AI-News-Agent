@@ -6,8 +6,9 @@ from google.adk.tools import google_search
 from google.adk.tools.agent_tool import AgentTool
 from pydantic import BaseModel, Field
 
-from .tools import get_date, get_previous_research_result, get_token_budget_info, read_notes, take_notes, verify_urls, youtube_search_tool
 from .fetch_tool import fetch_page_content
+from .tools import get_date, get_previous_research_result, get_token_budget_info, read_notes, take_notes, verify_urls, youtube_search_tool
+
 
 PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 
@@ -26,6 +27,11 @@ class YoutubeViewInput(BaseModel):
     )
     objectives: str = Field(
         description="A destailed instruction on what to look for in the videos; This objective will need to be targeted and detailed enough so that the subagent can follow it and provide the findings exactly as what the main agent would need. The objectives string is provided by the main agent."
+    )
+
+class XGrokResearchAgentInput(BaseModel):
+    objectives: str = Field(
+        description="The search objectives provided by the main agent to look up fresh information on X/Twitter."
     )
 
 # Use this instead of AgentTool to append token usage info at the end of every tool call
@@ -55,6 +61,17 @@ youtube_viewer_agent = Agent(
     input_schema=YoutubeViewInput,
 )
 
+x_grok_research_agent = Agent(
+    name="x_grok_research_agent",
+    model=LiteLlm(
+        model="openrouter/x-ai/grok-4.1-fast",
+        extra_body={"reasoning": {"effort": "none"}}
+    ),
+    description="A subagent dedicated to find hot and trending AI developments on X/Twitter. It expects the research objectives from the main agent.",
+    instruction=_load_prompt("x_grok_research_agent_instructions.md"),
+    input_schema=XGrokResearchAgentInput,
+)
+
 research_agent = Agent(
     name="research_agent",
     model=LiteLlm(
@@ -65,6 +82,7 @@ research_agent = Agent(
     tools=[
         AgentToolWithTokenMessage(agent=google_search_only_agent),
         AgentToolWithTokenMessage(agent=youtube_viewer_agent),
+        AgentToolWithTokenMessage(agent=x_grok_research_agent),
         fetch_page_content,
         get_date,
         get_previous_research_result,
