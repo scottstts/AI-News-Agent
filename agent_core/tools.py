@@ -240,6 +240,8 @@ def verify_urls(urls: list[str]) -> list[dict]:
     """
     Verify that URLs are alive and accessible by performing HEAD requests.
     Use this to validate source URLs before including them in your final output.
+    Uses curl_cffi with TLS fingerprint spoofing for robust verification that
+    matches what fetch_page_content will experience.
 
     Args:
         urls (list[str]): A list of URLs to verify.
@@ -247,39 +249,116 @@ def verify_urls(urls: list[str]) -> list[dict]:
     Returns:
         A list of dicts, each with 'url', 'valid' (bool), and 'status_code' or 'error'.
     """
-    import requests
+    # Lazy imports to avoid circular dependency (fetch_tool imports from tools)
+    from curl_cffi import requests as curl_requests
+    from . import fetch_tool
 
     results = []
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
-    }
 
     for url in urls:
-        try:
-            # Use HEAD request for lightweight check; fall back to GET if HEAD fails
-            resp = requests.head(url, headers=headers, timeout=10, allow_redirects=True)
-            if resp.status_code == 405:  # Method not allowed, try GET
-                resp = requests.get(url, headers=headers, timeout=10, allow_redirects=True, stream=True)
-                resp.close()
+        # Check for known blocked domains first
+        is_blocked, block_reason = fetch_tool._is_known_blocked_domain(url)
+        if is_blocked:
+            results.append({
+                "url": url,
+                "valid": False,
+                "error": f"known_blocked_domain: {block_reason}",
+            })
+            continue
 
-            valid = resp.status_code < 400
-            results.append({
-                "url": url,
-                "valid": valid,
-                "status_code": resp.status_code,
-            })
-        except requests.exceptions.Timeout:
-            results.append({
-                "url": url,
-                "valid": False,
-                "error": "timeout",
-            })
-        except requests.exceptions.RequestException as e:
-            results.append({
-                "url": url,
-                "valid": False,
-                "error": str(e),
-            })
+        # Get matched User-Agent and TLS fingerprint profile
+        user_agent, impersonate = fetch_tool._get_matched_profile()
+
+        headers = {
+            "User-Agent": user_agent,
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br",
+            "DNT": "1",
+            "Connection": "keep-alive",
+            "Upgrade-Insecure-Requests": "1",
+            "Sec-Fetch-Dest": "document",
+            "Sec-Fetch-Mode": "navigate",
+            "Sec-Fetch-User": "?1",
+        }
+
+        # Add realistic referer header
+        referer = fetch_tool._get_random_referer()
+        if referer:
+            headers["Referer"] = referer
+            headers["Sec-Fetch-Site"] = "cross-site"
+        else:
+            headers["Sec-Fetch-Site"] = "none"
+
+        try:
+            # Use HEAD request for lightweight check
+            resp = curl_requests.head(
+                url,
+                headers=headers,
+                timeout=10,
+                allow_redirects=True,
+                impersonate=impersonate,
+            )
+
+            # Fall back to GET if HEAD not allowed
+            if resp.status_code == 405:
+                resp = curl_requests.get(
+                    url,
+                    headers=headers,
+                    timeout=10,
+                    allow_redirects=True,
+                    impersonate=impersonate,
+                )
+
+            # Check for soft-block indicators in response headers/content
+            is_soft_blocked = False
+            if resp.status_code == 200:
+                # For GET responses, check content for soft-block
+                if resp.request.method == "GET" and resp.text:
+                    is_soft_blocked = fetch_tool._is_soft_block(resp.text[:5000], resp.status_code)
+                # For HEAD, check headers for Cloudflare challenge indicators
+                else:
+                    cf_headers = ["cf-mitigated", "cf-chl-bypass", "cf-ray"]
+                    if any(h in resp.headers for h in cf_headers):
+                        # Has CF headers, do a quick GET to check for challenge page
+                        get_resp = curl_requests.get(
+                            url,
+                            headers=headers,
+                            timeout=10,
+                            allow_redirects=True,
+                            impersonate=impersonate,
+                        )
+                        is_soft_blocked = fetch_tool._is_soft_block(get_resp.text[:5000], get_resp.status_code)
+
+            if is_soft_blocked:
+                results.append({
+                    "url": url,
+                    "valid": False,
+                    "status_code": resp.status_code,
+                    "error": "soft_block_detected",
+                })
+            else:
+                valid = resp.status_code < 400
+                results.append({
+                    "url": url,
+                    "valid": valid,
+                    "status_code": resp.status_code,
+                })
+
+        except Exception as e:
+            error_str = str(e).lower()
+            if "timeout" in error_str:
+                results.append({
+                    "url": url,
+                    "valid": False,
+                    "error": "timeout",
+                })
+            else:
+                results.append({
+                    "url": url,
+                    "valid": False,
+                    "error": str(e),
+                })
 
     return results
 

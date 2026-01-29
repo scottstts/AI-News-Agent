@@ -1,4 +1,6 @@
 from pathlib import Path
+import re
+import json
 
 from google.adk.agents import Agent
 from google.adk.models.lite_llm import LiteLlm
@@ -15,6 +17,38 @@ PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
 def _load_prompt(name: str) -> str:
     path = PROMPTS_DIR / name
     return path.read_text(encoding="utf-8")
+
+def _get_google_search_urls(agent_output: str) -> list[str] | None:
+    json_block_pattern = r"```(?:json)?\s*(\{[\s\S]*?\})\s*```"
+    match = re.search(json_block_pattern, agent_output)
+    if match:
+        try:
+            data = json.loads(match.group(1))
+            urls_list = []
+            for result in data["results"]:
+                for url_entry in result["URLs"]:
+                    urls_list.append(url_entry["URL"])
+
+            return urls_list
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    # Try to find raw JSON object (without code fence)
+    json_pattern = r"\{[\s\S]*\"results\"[\s\S]*\}"
+    match = re.search(json_pattern, agent_output)
+    if match:
+        try:
+            data = json.loads(match.group(0))
+            urls_list = []
+            for result in data["results"]:
+                for url_entry in result["URLs"]:
+                    urls_list.append(url_entry["URL"])
+
+            return urls_list
+        except (json.JSONDecodeError, KeyError):
+            pass
+
+    return None
 
 class SearchAgentInput(BaseModel):
     objectives: str = Field(
@@ -43,6 +77,21 @@ class AgentToolWithTokenMessage(AgentTool):
             "subagent_result": agent_output,
             "token_usage_info": get_token_budget_info(),
         }
+
+# append auto url validation info
+class GoogleSearchAgentTool(AgentTool):
+    async def run_async(self, *, args, tool_context):
+        agent_output = await super().run_async(args=args, tool_context=tool_context)
+
+        urls = _get_google_search_urls(agent_output=agent_output)
+        url_validation = verify_urls(urls=urls) if urls else "None"
+
+        return {
+            "subagent_result": agent_output,
+            "token_usage_info": get_token_budget_info(),
+            "auto_url_validation_result": url_validation,
+        }
+
 
 google_search_only_agent = Agent(
     name="google_search_agent",
@@ -80,7 +129,7 @@ research_agent = Agent(
     ),
     description="The main research agent that researches the specified content by organizing subagents and using various tools.",
     tools=[
-        AgentToolWithTokenMessage(agent=google_search_only_agent),
+        GoogleSearchAgentTool(agent=google_search_only_agent),
         AgentToolWithTokenMessage(agent=youtube_viewer_agent),
         AgentToolWithTokenMessage(agent=x_grok_research_agent),
         fetch_page_content,
