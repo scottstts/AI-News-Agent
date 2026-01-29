@@ -264,6 +264,7 @@ async def run_research_agent() -> tuple[Path, Path]:
         "fetch_calls": 0,
         "youtube_search_calls": 0,
         "youtube_viewer_calls": 0,
+        "x_search_calls": 0,
         "verify_urls_calls": 0,
         "final_prompt_tokens": 0,
         "final_total_tokens": 0,
@@ -294,6 +295,8 @@ async def run_research_agent() -> tuple[Path, Path]:
                         stats["total_tool_calls"] += 1
                         if func_name == "google_search_agent":
                             stats["search_agent_calls"] += 1
+                        elif func_name == "x_grok_research_agent":
+                            stats["x_search_calls"] += 1
                         elif func_name == "fetch_page_content":
                             stats["fetch_calls"] += 1
                         elif func_name == "youtube_search_tool":
