@@ -101,6 +101,7 @@ def format_run_stats_md(stats: dict, run_duration_seconds: float) -> str:
         f"| Run Duration | {run_duration_seconds:.1f}s |",
         f"| Total Tool Calls | {stats['total_tool_calls']} |",
         f"| Search Agent Calls | {stats['search_agent_calls']} |",
+        f"| X Search Calls | {stats['x_search_calls']} |",
         f"| Page Fetches | {stats['fetch_calls']} |",
         f"| YouTube Searches | {stats['youtube_search_calls']} |",
         f"| YouTube Viewer Calls | {stats['youtube_viewer_calls']} |",

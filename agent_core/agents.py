@@ -110,11 +110,11 @@ youtube_viewer_agent = Agent(
     input_schema=YoutubeViewInput,
 )
 
+# only xAI official API offers native X search, not available on openrouter endpoint
 x_grok_research_agent = Agent(
     name="x_grok_research_agent",
     model=LiteLlm(
-        model="openrouter/x-ai/grok-4.1-fast",
-        extra_body={"reasoning": {"effort": "low"}}
+        model="xai/grok-4-1-fast-reasoning",
     ),
     description="A subagent dedicated to find hot and trending AI developments on X/Twitter. It expects the research objectives from the main agent.",
     instruction=_load_prompt("x_grok_research_agent_instructions.md"),
