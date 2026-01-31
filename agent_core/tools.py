@@ -2,6 +2,7 @@ from googleapiclient.discovery import build
 from datetime import datetime, timedelta, timezone
 from dotenv import load_dotenv
 import os
+from pathlib import Path
 
 # GPT 5.2 has hard 272000 max input token limit
 MAX_INPUT_TOKENS = 240000
@@ -557,3 +558,50 @@ def read_notes(mode: str = "list", filenames: list[str] = None) -> dict:
 
     else:
         return {"status": "failure", "error": f"Invalid mode '{mode}'. Use 'list' or 'content'"}
+    
+# only xAI official API offers native X search, not available on openrouter endpoint
+# use separate openai sdk
+def grok_x_search(objectives: str) -> dict:
+    """
+    Invoke the X search sub-agent to search native X content about AI developments on X
+
+    Args:
+        objectives: the search objectives for the X search agent
+
+    Returns:
+        dict: a JSON containing the sug-agent's findings
+    """
+    from openai import OpenAI
+    PROMPTS_DIR = Path(__file__).resolve().parent / "prompts"
+
+    def _load_prompt(name: str) -> str:
+        path = PROMPTS_DIR / name
+        return path.read_text(encoding="utf-8")
+    
+    load_dotenv()
+
+    xai = OpenAI(
+        api_key=os.environ["XAI_API_KEY"],
+        base_url="https://api.x.ai/v1",
+    )
+
+    resp = xai.responses.create(
+        model="grok-4-1-fast-reasoning",
+        input=[
+            {"role": "system", "content": _load_prompt("x_grok_research_agent_instructions.md")},
+            {"role": "user", "content": objectives},
+        ],
+        tools=[{"type": "x_search"}],  # enable only; agent decides args/calls
+    )
+
+    text_parts = []
+    for item in resp.output:
+        if getattr(item, "type", None) == "message":
+            for part in item.content:
+                if getattr(part, "type", None) == "output_text":
+                    text_parts.append(part.text)
+
+    return {
+        "text": "".join(text_parts),
+        "token_usage_info": get_token_budget_info(),
+    }
