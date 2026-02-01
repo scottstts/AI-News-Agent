@@ -296,7 +296,7 @@ async def run_research_agent() -> tuple[Path, Path]:
                         stats["total_tool_calls"] += 1
                         if func_name == "google_search_agent":
                             stats["search_agent_calls"] += 1
-                        elif func_name == "x_grok_research_agent":
+                        elif func_name == "grok_x_search":
                             stats["x_search_calls"] += 1
                         elif func_name == "fetch_page_content":
                             stats["fetch_calls"] += 1
