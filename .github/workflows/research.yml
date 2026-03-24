@@ -21,13 +21,18 @@ jobs:
         uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-          cache: 'pip'
 
-      - name: Install Python dependencies
-        run: pip install -r requirements.txt
+      - name: Install uv
+        uses: astral-sh/setup-uv@v7
+        with:
+          version: "0.10.7"
+          enable-cache: true
+
+      - name: Sync locked Python dependencies
+        run: uv sync --locked --no-dev
 
       - name: Install Playwright browsers
-        run: playwright install --with-deps chromium
+        run: uv run --no-sync playwright install --with-deps chromium
 
       - name: Create credentials directory
         run: mkdir -p credentials
@@ -82,7 +87,7 @@ jobs:
           MONITOR_PID=$!
 
           # Run the agent
-          python3 app.py --now
+          uv run --no-sync python app.py --now
           EXIT_CODE=$?
 
           # Stop the monitoring process
